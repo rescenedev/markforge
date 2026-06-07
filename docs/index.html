@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MarkForge — native macOS Markdown viewer & editor</title>
+<meta name="description" content="A fast, native macOS Markdown viewer and editor built in Rust on GPUI. GPU-accelerated, live reload, split editor, no Electron." />
+<meta property="og:title" content="MarkForge" />
+<meta property="og:description" content="A fast, native macOS Markdown viewer & editor built in Rust on GPUI." />
+<meta property="og:image" content="icon.png" />
+<link rel="icon" href="icon.png" />
+<style>
+  :root{
+    --bg:#0b0b12; --bg2:#11111c; --card:#16161f; --line:#262633;
+    --fg:#ececf1; --mut:#a0a0b0; --indigo:#6366f1; --violet:#8b5cf6;
+    --accent:linear-gradient(135deg,#6366f1,#8b5cf6);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;
+    background:radial-gradient(1200px 600px at 50% -200px,#1d1b3a 0%,var(--bg) 60%);
+    color:var(--fg);line-height:1.6;-webkit-font-smoothing:antialiased;
+  }
+  a{color:inherit;text-decoration:none}
+  .wrap{max-width:1040px;margin:0 auto;padding:0 24px}
+  .btn{
+    display:inline-flex;align-items:center;gap:8px;padding:13px 22px;border-radius:12px;
+    font-weight:600;font-size:15px;transition:.2s;border:1px solid transparent;cursor:pointer;
+  }
+  .btn-primary{background:var(--accent);color:#fff;box-shadow:0 8px 30px rgba(99,102,241,.35)}
+  .btn-primary:hover{transform:translateY(-2px);box-shadow:0 12px 38px rgba(99,102,241,.5)}
+  .btn-ghost{background:#ffffff0d;border-color:var(--line);color:var(--fg)}
+  .btn-ghost:hover{background:#ffffff1a}
+
+  /* NAV */
+  nav{display:flex;align-items:center;justify-content:space-between;padding:22px 0}
+  .brand{display:flex;align-items:center;gap:12px;font-weight:700;font-size:18px}
+  .brand img{width:34px;height:34px;border-radius:9px}
+  .nav-links{display:flex;gap:24px;align-items:center;color:var(--mut);font-size:14px}
+  .nav-links a:hover{color:var(--fg)}
+
+  /* HERO */
+  .hero{text-align:center;padding:64px 0 40px}
+  .hero img.logo{width:112px;height:112px;border-radius:26px;box-shadow:0 20px 60px rgba(99,102,241,.4);margin-bottom:28px}
+  .hero h1{font-size:clamp(40px,7vw,68px);line-height:1.05;letter-spacing:-.03em;font-weight:800}
+  .hero h1 .grad{background:var(--accent);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .hero p.sub{font-size:clamp(17px,2.4vw,21px);color:var(--mut);max-width:620px;margin:20px auto 0}
+  .cta{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin-top:34px}
+  .pill{display:inline-flex;gap:8px;align-items:center;margin-top:22px;font-size:13px;color:var(--mut)}
+  .pill b{color:var(--fg)}
+  .dot{width:6px;height:6px;border-radius:50%;background:#3ddc84}
+
+  /* WINDOW MOCKUP */
+  .shot{margin:56px auto 0;max-width:920px;border-radius:14px;overflow:hidden;border:1px solid var(--line);
+    box-shadow:0 40px 100px rgba(0,0,0,.6);background:var(--card)}
+  .titlebar{display:flex;align-items:center;gap:8px;padding:11px 14px;background:#1b1b27;border-bottom:1px solid var(--line)}
+  .tl{width:12px;height:12px;border-radius:50%}
+  .tl.r{background:#ff5f57}.tl.y{background:#febc2e}.tl.g{background:#28c840}
+  .titlebar .name{margin-left:10px;font-size:13px;color:var(--mut);display:flex;align-items:center;gap:7px}
+  .titlebar .name svg{width:15px;height:15px;opacity:.8}
+  .split{display:grid;grid-template-columns:1fr 1fr;min-height:300px}
+  .pane{padding:20px 22px;font-size:13.5px}
+  .editor{background:#0f0f17;border-right:1px solid var(--line);font-family:"SF Mono",ui-monospace,Menlo,monospace;color:#c9c9d6;white-space:pre-wrap}
+  .editor .h{color:#8b5cf6}.editor .b{color:#ececf1;font-weight:700}.editor .c{color:#6f6f86}.editor .k{color:#f0a868}
+  .preview h2{font-size:20px;margin:0 0 8px;letter-spacing:-.01em}
+  .preview h3{font-size:15px;margin:16px 0 6px;color:#cfcfe0}
+  .preview p{color:#c7c7d4;font-size:14px;margin:0 0 10px}
+  .preview code{background:#ffffff14;padding:1.5px 6px;border-radius:5px;font-family:ui-monospace,Menlo,monospace;font-size:12.5px}
+  .preview .task{display:flex;align-items:center;gap:9px;font-size:14px;color:#c7c7d4;margin:5px 0}
+  .preview .box{width:15px;height:15px;border-radius:4px;border:1.5px solid var(--indigo);display:inline-flex;align-items:center;justify-content:center;flex:none}
+  .preview .box.on{background:var(--indigo)}
+  .preview .box.on::after{content:"✓";color:#fff;font-size:10px;line-height:1}
+  @media(max-width:680px){.split{grid-template-columns:1fr}.editor{display:none}}
+
+  /* FEATURES */
+  section{padding:72px 0}
+  .eyebrow{text-align:center;color:var(--violet);font-weight:700;font-size:13px;letter-spacing:.08em;text-transform:uppercase}
+  h2.title{text-align:center;font-size:clamp(28px,4vw,40px);letter-spacing:-.02em;margin-top:10px;font-weight:800}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:44px}
+  @media(max-width:780px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:26px}
+  .card .ic{width:42px;height:42px;border-radius:11px;background:#ffffff0d;display:flex;align-items:center;justify-content:center;font-size:20px;margin-bottom:16px}
+  .card h3{font-size:17px;margin-bottom:7px}
+  .card p{color:var(--mut);font-size:14.5px}
+
+  /* INSTALL */
+  .install{background:var(--bg2);border:1px solid var(--line);border-radius:20px;padding:40px;margin-top:8px}
+  .code{background:#0a0a10;border:1px solid var(--line);border-radius:12px;padding:16px 18px;font-family:ui-monospace,Menlo,monospace;
+    font-size:14px;color:#d7d7e3;overflow-x:auto;display:flex;justify-content:space-between;align-items:center;gap:16px}
+  .code + .code{margin-top:12px}
+  .code .muted{color:#6f6f86}
+  .copy{background:#ffffff12;border:1px solid var(--line);color:var(--mut);border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer;flex:none}
+  .copy:hover{color:var(--fg)}
+  .kbd{display:inline-block;background:#0a0a10;border:1px solid var(--line);border-bottom-width:2px;border-radius:6px;padding:2px 8px;font-family:ui-monospace,Menlo,monospace;font-size:12.5px}
+  .keys{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-top:30px}
+  .keys div{display:flex;justify-content:space-between;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:11px 15px;font-size:14px;color:var(--mut)}
+
+  footer{border-top:1px solid var(--line);padding:36px 0;text-align:center;color:var(--mut);font-size:13.5px}
+  footer a{color:var(--fg);font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <a class="brand" href="#"><img src="icon.png" alt="MarkForge"/>MarkForge</a>
+    <div class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/rescenedev/markforge">GitHub ↗</a>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <img class="logo" src="icon.png" alt="MarkForge icon"/>
+    <h1>The <span class="grad">native</span> Markdown<br/>app for macOS</h1>
+    <p class="sub">A blazing-fast Markdown viewer &amp; editor built in Rust on GPUI — the engine behind Zed. GPU-accelerated, live reload, split editing. No Electron.</p>
+    <div class="cta">
+      <a class="btn btn-primary" href="#install">↓ Install with Homebrew</a>
+      <a class="btn btn-ghost" href="https://github.com/rescenedev/markforge/releases/latest">Download .app</a>
+    </div>
+    <div class="pill"><span class="dot"></span> <b>~18 MB</b>&nbsp;binary · <b>~70 MB</b>&nbsp;RAM · <b>~0%</b>&nbsp;idle CPU</div>
+
+    <!-- App window mockup -->
+    <div class="shot">
+      <div class="titlebar">
+        <span class="tl r"></span><span class="tl y"></span><span class="tl g"></span>
+        <span class="name">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5a2 2 0 0 1 2-2h9l5 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/></svg>
+          README.md
+        </span>
+      </div>
+      <div class="split">
+        <div class="pane editor"><span class="b"># MarkForge</span>
+
+A <span class="k">**native**</span> macOS Markdown app.
+
+<span class="h">## Features</span>
+- Live reload
+- Split editor
+
+<span class="c">```rust
+fn main() {
+    println!("fast!");
+}
+```</span></div>
+        <div class="pane preview">
+          <h2>MarkForge</h2>
+          <p>A <strong>native</strong> macOS Markdown app.</p>
+          <h3>Features</h3>
+          <div class="task"><span class="box on"></span> Live reload</div>
+          <div class="task"><span class="box on"></span> Split editor</div>
+          <div class="task"><span class="box"></span> Tabs (soon)</div>
+          <p style="margin-top:14px"><code>fn main() { … }</code></p>
+        </div>
+      </div>
+    </div>
+  </header>
+</div>
+
+<section id="features">
+  <div class="wrap">
+    <div class="eyebrow">Why MarkForge</div>
+    <h2 class="title">Native speed, real Markdown</h2>
+    <div class="grid">
+      <div class="card"><div class="ic">⚡</div><h3>GPU-accelerated</h3><p>Rendered with Metal via GPUI — the same engine as the Zed editor. Sleeps at ~0% CPU when idle.</p></div>
+      <div class="card"><div class="ic">🪶</div><h3>Tiny &amp; native</h3><p>A single ~18 MB binary, ~70 MB RAM. No web view, no Electron, no runtime.</p></div>
+      <div class="card"><div class="ic">✍️</div><h3>Split editor</h3><p>⌘E into a resizable source editor with syntax highlighting and live preview as you type.</p></div>
+      <div class="card"><div class="ic">♻️</div><h3>Live reload</h3><p>Edit a file in any other app and MarkForge updates instantly — debounced for smooth typing.</p></div>
+      <div class="card"><div class="ic">🌗</div><h3>Light · Dark · System</h3><p>Follows your macOS appearance, or pick a fixed theme. Zoom and fonts are configurable and persisted.</p></div>
+      <div class="card"><div class="ic">📂</div><h3>Open anywhere</h3><p>File dialog, drag-and-drop, recent files, or a command-line argument. Your settings travel with you.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="install" style="padding-top:0">
+  <div class="wrap">
+    <div class="install">
+      <div class="eyebrow" style="text-align:left">Install</div>
+      <h2 class="title" style="text-align:left;margin-bottom:24px">Up and running in seconds</h2>
+
+      <div class="code"><span><span class="muted"># Homebrew (recommended)</span><br/>brew install --cask rescenedev/tap/markforge</span>
+        <button class="copy" data-c="brew install --cask rescenedev/tap/markforge">Copy</button></div>
+
+      <div class="code"><span><span class="muted"># or build from source (needs Rust)</span><br/>git clone https://github.com/rescenedev/markforge &amp;&amp; cd markforge &amp;&amp; cargo run --release</span>
+        <button class="copy" data-c="git clone https://github.com/rescenedev/markforge && cd markforge && cargo run --release">Copy</button></div>
+
+      <div class="keys">
+        <div><span>Open file</span><span class="kbd">⌘O</span></div>
+        <div><span>Save</span><span class="kbd">⌘S</span></div>
+        <div><span>Toggle editor</span><span class="kbd">⌘E</span></div>
+        <div><span>Zoom in / out</span><span class="kbd">⌘ + / −</span></div>
+        <div><span>Settings</span><span class="kbd">⌘,</span></div>
+        <div><span>Toggle theme</span><span class="kbd">⌘⇧L</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    Built in Rust on <a href="https://github.com/longbridge/gpui-component">GPUI Component</a> ·
+    <a href="https://github.com/rescenedev/markforge">Source on GitHub</a> · MIT License
+  </div>
+</footer>
+
+<script>
+  document.querySelectorAll('.copy').forEach(b=>{
+    b.addEventListener('click',()=>{
+      navigator.clipboard.writeText(b.dataset.c);
+      const t=b.textContent;b.textContent='Copied!';setTimeout(()=>b.textContent=t,1200);
+    });
+  });
+</script>
+</body>
+</html>

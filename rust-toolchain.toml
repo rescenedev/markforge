@@ -1,0 +1,6 @@
+# Match the toolchain that Zed's `gpui` (a git dependency) is built with.
+# GPUI's main branch uses standard-library APIs (e.g. `slice::as_array`) that
+# were stabilized in Rust 1.95, so older toolchains fail to compile it.
+[toolchain]
+channel = "1.95.0"
+profile = "minimal"

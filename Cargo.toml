@@ -1,0 +1,68 @@
+[package]
+name = "markforge"
+version = "0.1.0"
+edition = "2024"
+description = "A native macOS Markdown viewer (and, soon, editor) built on GPUI."
+publish = false
+
+[[bin]]
+name = "markforge"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# GPUI core + macOS platform layer. Pinned to the same `zed-industries/zed`
+# main that `gpui-component` resolves to, so Cargo unifies them into one copy.
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
+    "font-kit",
+    "x11",
+    "wayland",
+    "runtime_shaders",
+] }
+
+# shadcn-style component library on top of GPUI (provides the Markdown view,
+# TitleBar, Button, theming, icons, …). Pinned to a known-good revision.
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "70d2c44bd62ab16adf3cb791bf776e53d5ea312b", features = [
+    # Markdown grammar is required for the editor's code-editor mode; the rest
+    # give syntax highlighting to fenced code blocks in the preview.
+    "tree-sitter-markdown",
+    "tree-sitter-rust",
+    "tree-sitter-python",
+    "tree-sitter-javascript",
+    "tree-sitter-typescript",
+    "tree-sitter-tsx",
+    "tree-sitter-bash",
+    "tree-sitter-go",
+    "tree-sitter-html",
+    "tree-sitter-css",
+    "tree-sitter-yaml",
+    "tree-sitter-toml",
+] }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "70d2c44bd62ab16adf3cb791bf776e53d5ea312b" }
+
+# Use a local, lightly-patched copy of gpui-component (task-list checkbox
+# alignment fix in crates/ui/src/text/node.rs). Same revision as the git dep.
+[patch."https://github.com/longbridge/gpui-component"]
+gpui-component = { path = "vendor/gpui-component/crates/ui" }
+gpui-component-assets = { path = "vendor/gpui-component/crates/assets" }
+gpui-component-macros = { path = "vendor/gpui-component/crates/macros" }
+
+[profile.dev]
+# Heavy dependency graph (Zed's GPUI). Optimize deps so the dev binary is
+# usable while keeping our own crate fast to rebuild.
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+opt-level = 3       # maximize runtime speed
+lto = "fat"         # cross-crate link-time optimization (smaller + faster)
+codegen-units = 1   # better optimization at the cost of build parallelism
+strip = "symbols"   # drop debug/symbol tables → much smaller binary
+# `panic = "abort"` is intentionally NOT set: GPUI relies on unwinding
+# (catch_unwind) in places, so we keep the default "unwind".

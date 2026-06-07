@@ -1,0 +1,197 @@
+//! MarkForge — a native macOS Markdown viewer & editor.
+//!
+//! Built on GPUI (Zed's GPU-accelerated UI framework) and the shadcn-style
+//! `gpui-component` library. This entry point wires up the application:
+//! actions, the macOS menu bar, key bindings, persisted settings, and the window.
+
+mod app;
+mod rem_scaled;
+mod settings;
+
+use app::MarkForge;
+use settings::Settings;
+use std::path::PathBuf;
+
+use gpui::prelude::*;
+use gpui::{
+    Action, App, Bounds, Focusable, KeyBinding, Menu, MenuItem, WindowBounds, WindowKind,
+    WindowOptions, actions, px, size,
+};
+use gpui_component::{Root, TitleBar};
+use gpui_component_assets::Assets;
+use serde::Deserialize;
+
+// Unit actions. Document-related ones are handled by the view (they need state);
+// `Quit` is handled globally on the `App`.
+actions!(
+    markforge,
+    [
+        OpenFile,
+        Reload,
+        Save,
+        ToggleEdit,
+        ToggleTheme,
+        ToggleSettings,
+        FontInc,
+        FontDec,
+        ZoomIn,
+        ZoomOut,
+        ZoomReset,
+        Quit
+    ]
+);
+
+/// Open a specific file from the "Open Recent" menu. Carries the path as a string.
+#[derive(Clone, PartialEq, Eq, Action, Deserialize)]
+#[action(namespace = markforge, no_json)]
+pub struct OpenRecent(pub String);
+
+/// Set the theme preference: "system", "light", or "dark".
+#[derive(Clone, PartialEq, Eq, Action, Deserialize)]
+#[action(namespace = markforge, no_json)]
+pub struct SetTheme(pub String);
+
+fn main() {
+    let application = gpui_platform::application().with_assets(Assets);
+
+    application.run(move |cx| {
+        // Required before using any gpui-component feature.
+        gpui_component::init(cx);
+
+        // Load persisted settings and install them as a global.
+        cx.set_global(Settings::load());
+
+        register_global_actions(cx);
+        bind_keys(cx);
+        set_menus(cx);
+        cx.activate(true);
+
+        // Allow `markforge path/to/file.md` to open a document on launch.
+        let initial_path = std::env::args().nth(1).map(PathBuf::from);
+        open_main_window(initial_path, cx);
+    });
+}
+
+/// Global (App-level) action handlers. Theme/zoom/document actions are handled by
+/// the view so they have access to the window and document state.
+fn register_global_actions(cx: &mut App) {
+    cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+}
+
+fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("cmd-o", OpenFile, None),
+        KeyBinding::new("cmd-r", Reload, None),
+        KeyBinding::new("cmd-s", Save, None),
+        KeyBinding::new("cmd-e", ToggleEdit, None),
+        KeyBinding::new("cmd-,", ToggleSettings, None),
+        KeyBinding::new("cmd-shift-l", ToggleTheme, None),
+        // Zoom. Accept both the bare `=`/`+` keys so ⌘+ works with or without Shift.
+        KeyBinding::new("cmd-=", ZoomIn, None),
+        KeyBinding::new("cmd-+", ZoomIn, None),
+        KeyBinding::new("cmd-shift-=", ZoomIn, None),
+        KeyBinding::new("cmd--", ZoomOut, None),
+        KeyBinding::new("cmd-0", ZoomReset, None),
+        KeyBinding::new("cmd-q", Quit, None),
+    ]);
+}
+
+/// (Re)build the macOS menu bar. Reads the current recent-files list from the
+/// global settings, so call this again whenever that list changes.
+pub fn set_menus(cx: &mut App) {
+    let recent = cx
+        .try_global::<Settings>()
+        .map(|s| s.recent.clone())
+        .unwrap_or_default();
+
+    let recent_items: Vec<MenuItem> = if recent.is_empty() {
+        vec![MenuItem::action("No Recent Files", OpenRecent(String::new()))]
+    } else {
+        recent
+            .iter()
+            .map(|p| {
+                let label = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| p.to_string_lossy().to_string());
+                MenuItem::action(label, OpenRecent(p.to_string_lossy().to_string()))
+            })
+            .collect()
+    };
+
+    cx.set_menus(vec![
+        Menu {
+            name: "MarkForge".into(),
+            items: vec![
+                MenuItem::action("Settings…", ToggleSettings),
+                MenuItem::Submenu(Menu {
+                    name: "Appearance".into(),
+                    items: vec![
+                        MenuItem::action("System", SetTheme("system".into())),
+                        MenuItem::action("Light", SetTheme("light".into())),
+                        MenuItem::action("Dark", SetTheme("dark".into())),
+                    ],
+                    disabled: false,
+                }),
+                MenuItem::separator(),
+                MenuItem::action("Quit MarkForge", Quit),
+            ],
+            disabled: false,
+        },
+        Menu {
+            name: "File".into(),
+            items: vec![
+                MenuItem::action("Open…", OpenFile),
+                MenuItem::Submenu(Menu {
+                    name: "Open Recent".into(),
+                    items: recent_items,
+                    disabled: false,
+                }),
+                MenuItem::separator(),
+                MenuItem::action("Save", Save),
+                MenuItem::action("Reload", Reload),
+            ],
+            disabled: false,
+        },
+        Menu {
+            name: "View".into(),
+            items: vec![
+                MenuItem::action("Toggle Editor", ToggleEdit),
+                MenuItem::separator(),
+                MenuItem::action("Zoom In", ZoomIn),
+                MenuItem::action("Zoom Out", ZoomOut),
+                MenuItem::action("Actual Size", ZoomReset),
+            ],
+            disabled: false,
+        },
+    ]);
+}
+
+fn open_main_window(initial_path: Option<PathBuf>, cx: &mut App) {
+    let window_size = size(px(1100.), px(820.));
+    let bounds = Bounds::centered(None, window_size, cx);
+
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: Some(TitleBar::title_bar_options()),
+        window_min_size: Some(size(px(480.), px(360.))),
+        kind: WindowKind::Normal,
+        ..Default::default()
+    };
+
+    let window = cx
+        .open_window(options, |window, cx| {
+            let view = cx.new(|cx| MarkForge::new(initial_path.clone(), window, cx));
+
+            // Focus the view so its key-bound actions dispatch.
+            let focus_handle = view.focus_handle(cx);
+            window.defer(cx, move |window, cx| focus_handle.focus(window, cx));
+
+            cx.new(|cx| Root::new(view, window, cx))
+        })
+        .expect("failed to open window");
+
+    window
+        .update(cx, |_, window, _| window.activate_window())
+        .ok();
+}

@@ -1,0 +1,105 @@
+# MarkForge
+
+A **native macOS Markdown viewer** (with an editor on the roadmap), built in Rust
+on [GPUI](https://github.com/zed-industries/zed) — Zed's GPU-accelerated UI
+framework — and the [gpui-component](https://github.com/longbridge/gpui-component)
+widget library.
+
+No web view, no Electron. The Markdown is rendered by the same engine that powers
+Zed's own preview.
+
+## Features
+
+- **Native & fast** — GPU-accelerated rendering, instant startup.
+- **Viewer + editor** — read full-width, or ⌘E into a resizable split with a
+  syntax-highlighted Markdown source editor and live preview.
+- **Live reload** — edit the file in any other app and MarkForge updates it
+  automatically (mtime-polled in the background); debounced so typing stays smooth.
+- **Zoom** — ⌘+/⌘-/⌘0 scales both editor and preview (body, headings, code).
+- **Theme** — light (default), dark, or follow the macOS system appearance.
+- **Recent files** — File ▸ Open Recent.
+- **Persisted settings** — theme, zoom, and recent files are remembered across launches.
+- **Open anywhere** — file dialog, drag-and-drop, or a command-line argument.
+
+**Website:** https://rescenedev.github.io/markforge/
+
+## Install
+
+```bash
+# Homebrew (recommended)
+brew install --cask rescenedev/tap/markforge
+```
+
+Or grab `MarkForge.app` from the [latest release](https://github.com/rescenedev/markforge/releases/latest).
+
+## Usage
+
+```bash
+# Run with the bundled sample document
+cargo run --release
+
+# Open a specific file
+cargo run --release -- path/to/notes.md
+
+# Build a distributable macOS .app bundle (→ target/release/MarkForge.app)
+./scripts/bundle.sh
+```
+
+### Shortcuts
+
+| Action               | Key      |
+| -------------------- | -------- |
+| Open file            | ⌘O       |
+| Save                 | ⌘S       |
+| Settings             | ⌘,       |
+| Toggle editor        | ⌘E       |
+| Zoom in / out / reset| ⌘+ / ⌘- / ⌘0 |
+| Reload               | ⌘R       |
+| Toggle light/dark    | ⌘⇧L      |
+| Quit                 | ⌘Q       |
+
+You can also **drag a `.md` file onto the window** to open it.
+
+Settings are stored at `~/Library/Application Support/MarkForge/settings.json`.
+
+## Building
+
+Requires a recent stable Rust toolchain (edition 2024 → Rust ≥ 1.85) and the
+Xcode Command Line Tools.
+
+```bash
+cargo build --release
+```
+
+> The first build compiles GPUI and a large dependency graph from source, so it
+> takes a while. Subsequent builds are incremental and fast.
+
+## Roadmap
+
+- [x] Markdown viewer
+- [x] Live reload
+- [x] Drag-and-drop + file dialog
+- [x] Split-pane **editor** with live preview
+- [x] Syntax-highlighted source editing
+- [x] Content zoom
+- [x] Light / dark / system theme + persisted settings
+- [x] Recent files
+- [ ] Tabs / multiple open documents
+- [ ] `.app` bundle + Finder file association
+- [ ] Outline (table of contents) sidebar
+- [ ] Export to PDF / HTML
+
+## Project layout
+
+```
+src/
+  main.rs     # app bootstrap: actions, menus, key bindings, window
+  app.rs      # MarkForge view: title bar, editor/preview, zoom, live-reload watcher
+  settings.rs # persisted settings (theme, zoom, recent files)
+assets/
+  sample.md   # bundled showcase document
+```
+
+## License
+
+MIT.
