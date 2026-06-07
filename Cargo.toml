@@ -61,8 +61,9 @@ opt-level = 2
 
 [profile.release]
 opt-level = 3       # maximize runtime speed
-lto = "fat"         # cross-crate link-time optimization (smaller + faster)
-codegen-units = 1   # better optimization at the cost of build parallelism
+lto = "thin"        # parallel cross-crate LTO — far faster to link than "fat",
+                    # with near-identical runtime/size. Big CI build-time win.
 strip = "symbols"   # drop debug/symbol tables → much smaller binary
+# `codegen-units` stays at the release default (16) for parallel codegen.
 # `panic = "abort"` is intentionally NOT set: GPUI relies on unwinding
 # (catch_unwind) in places, so we keep the default "unwind".
