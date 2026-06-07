@@ -59,8 +59,13 @@
   .tl.r{background:#ff5f57}.tl.y{background:#febc2e}.tl.g{background:#28c840}
   .titlebar .name{margin-left:10px;font-size:13px;color:var(--mut);display:flex;align-items:center;gap:7px}
   .titlebar .name svg{width:15px;height:15px;opacity:.8}
-  .split{display:grid;grid-template-columns:1fr 1fr;min-height:300px}
+  .split{display:grid;grid-template-columns:172px 1fr 1fr;min-height:300px}
   .pane{padding:20px 22px;font-size:13.5px}
+  .explorer{background:#0f0f17;border-right:1px solid var(--line);padding:8px 6px;font-size:12.5px}
+  .explorer .ehead{font-size:10px;letter-spacing:.08em;color:#6f6f86;padding:2px 8px 8px;font-weight:700}
+  .explorer .frow{display:flex;align-items:center;gap:7px;padding:4px 9px;border-radius:6px;color:#b9b9c8;white-space:nowrap}
+  .explorer .frow.sel{background:#0a84ff;color:#fff}
+  .explorer .frow.hov{background:rgba(10,132,255,.22)}
   .editor{background:#0f0f17;border-right:1px solid var(--line);font-family:"SF Mono",ui-monospace,Menlo,monospace;color:#c9c9d6;white-space:pre-wrap}
   .editor .h{color:#8b5cf6}.editor .b{color:#ececf1;font-weight:700}.editor .c{color:#6f6f86}.editor .k{color:#f0a868}
   .preview h2{font-size:20px;margin:0 0 8px;letter-spacing:-.01em}
@@ -71,7 +76,7 @@
   .preview .box{width:15px;height:15px;border-radius:4px;border:1.5px solid var(--indigo);display:inline-flex;align-items:center;justify-content:center;flex:none}
   .preview .box.on{background:var(--indigo)}
   .preview .box.on::after{content:"✓";color:#fff;font-size:10px;line-height:1}
-  @media(max-width:680px){.split{grid-template-columns:1fr}.editor{display:none}}
+  @media(max-width:680px){.split{grid-template-columns:1fr}.editor,.explorer{display:none}}
 
   /* FEATURES */
   section{padding:72px 0}
@@ -114,7 +119,7 @@
   <header class="hero">
     <img class="logo" src="icon.png" alt="MarkForge icon"/>
     <h1>The <span class="grad">native</span> Markdown<br/>app for macOS</h1>
-    <p class="sub">A blazing-fast Markdown viewer &amp; editor built in Rust on GPUI — the engine behind Zed. GPU-accelerated, live reload, split editing. No Electron.</p>
+    <p class="sub">A blazing-fast Markdown viewer &amp; editor built in Rust on GPUI — the engine behind Zed. File explorer, live reload, split editing. No Electron.</p>
     <div class="cta">
       <a class="btn btn-primary" href="#install">↓ Install with Homebrew</a>
       <a class="btn btn-ghost" href="https://github.com/rescenedev/markforge/releases/latest">Download .app</a>
@@ -131,6 +136,14 @@
         </span>
       </div>
       <div class="split">
+        <div class="pane explorer">
+          <div class="ehead">MARKFORGE</div>
+          <div class="frow">📁&nbsp; src</div>
+          <div class="frow">📁&nbsp; docs</div>
+          <div class="frow hov">📁&nbsp; assets</div>
+          <div class="frow sel">📄&nbsp; README.md</div>
+          <div class="frow">📄&nbsp; Cargo.toml</div>
+        </div>
         <div class="pane editor"><span class="b"># MarkForge</span>
 
 A <span class="k">**native**</span> macOS Markdown app.
@@ -164,6 +177,7 @@ fn main() {
     <h2 class="title">Native speed, real Markdown</h2>
     <div class="grid">
       <div class="card"><div class="ic">⚡</div><h3>GPU-accelerated</h3><p>Rendered with Metal via GPUI — the same engine as the Zed editor. Sleeps at ~0% CPU when idle.</p></div>
+      <div class="card"><div class="ic">🗂️</div><h3>File explorer</h3><p>A VSCode-style sidebar (⌘B). Open a folder, browse the tree, click any file to open it — with native macOS selection.</p></div>
       <div class="card"><div class="ic">🪶</div><h3>Tiny &amp; native</h3><p>A single ~18 MB binary, ~70 MB RAM. No web view, no Electron, no runtime.</p></div>
       <div class="card"><div class="ic">✍️</div><h3>Split editor</h3><p>⌘E into a resizable source editor with syntax highlighting and live preview as you type.</p></div>
       <div class="card"><div class="ic">♻️</div><h3>Live reload</h3><p>Edit a file in any other app and MarkForge updates instantly — debounced for smooth typing.</p></div>
@@ -187,6 +201,8 @@ fn main() {
 
       <div class="keys">
         <div><span>Open file</span><span class="kbd">⌘O</span></div>
+        <div><span>Open folder</span><span class="kbd">⌘⇧O</span></div>
+        <div><span>Toggle sidebar</span><span class="kbd">⌘B</span></div>
         <div><span>Save</span><span class="kbd">⌘S</span></div>
         <div><span>Toggle editor</span><span class="kbd">⌘E</span></div>
         <div><span>Zoom in / out</span><span class="kbd">⌘ + / −</span></div>

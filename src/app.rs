@@ -28,11 +28,12 @@ use gpui_component::{
     v_flex,
 };
 
+use crate::file_tree::FileTree;
 use crate::rem_scaled::RemScaled;
 use crate::settings::{FONT_SIZE_MAX, FONT_SIZE_MIN, Settings, ThemePref};
 use crate::{
-    FontDec, FontInc, OpenFile, OpenRecent, Reload, Save, SetTheme, ToggleEdit, ToggleSettings,
-    ToggleTheme, ZoomIn, ZoomOut, ZoomReset,
+    FontDec, FontInc, OpenFile, OpenFolder, OpenRecent, Reload, Save, SetTheme, ToggleEdit,
+    ToggleSettings, ToggleSidebar, ToggleTheme, ZoomIn, ZoomOut, ZoomReset,
 };
 
 /// Bundled showcase document, displayed on first launch.
@@ -74,6 +75,10 @@ pub struct MarkForge {
     dirty: bool,
     /// Content zoom factor (1.0 == 100%).
     zoom: f32,
+    /// File-explorer model (opened folder, expansion, listings).
+    file_tree: FileTree,
+    /// Whether the left sidebar (file explorer) is shown.
+    sidebar_open: bool,
     /// Whether the Settings panel is open.
     show_settings: bool,
     /// Text field for the editor (monospace) font family.
@@ -148,6 +153,8 @@ impl MarkForge {
             editing: false,
             dirty: false,
             zoom: settings.zoom.clamp(ZOOM_MIN, ZOOM_MAX),
+            file_tree: FileTree::new(),
+            sidebar_open: false,
             show_settings: false,
             editor_font_input,
             preview_font_input,
@@ -157,6 +164,12 @@ impl MarkForge {
         };
 
         match initial {
+            // A directory argument opens the file-explorer sidebar.
+            Some(path) if path.is_dir() => {
+                this.file_tree.open(path);
+                this.sidebar_open = true;
+                this.set_editor_text(SAMPLE, window, cx);
+            }
             Some(path) => this.load_path(path, window, cx),
             // Greet the user with the bundled sample document.
             None => this.set_editor_text(SAMPLE, window, cx),
@@ -308,6 +321,48 @@ impl MarkForge {
             return; // the "No Recent Files" placeholder
         }
         self.load_path(PathBuf::from(action.0.clone()), window, cx);
+    }
+
+    fn on_open_folder(&mut self, _: &OpenFolder, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open Folder".into()),
+        });
+
+        cx.spawn_in(window, async move |this, cx| {
+            let path = rx.await.ok()?.ok()??.into_iter().next()?;
+            this.update_in(cx, |this, _window, cx| {
+                this.file_tree.open(path);
+                this.sidebar_open = true;
+                cx.notify();
+            })
+            .ok()?;
+            Some(())
+        })
+        .detach();
+    }
+
+    fn on_toggle_sidebar(&mut self, _: &ToggleSidebar, _window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_open = !self.sidebar_open;
+        cx.notify();
+    }
+
+    /// Clicked a row in the file tree: toggle folders, open files.
+    fn on_tree_entry(
+        &mut self,
+        path: PathBuf,
+        is_dir: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if is_dir {
+            self.file_tree.toggle(&path);
+            cx.notify();
+        } else {
+            self.load_path(path, window, cx);
+        }
     }
 
     fn on_reload(&mut self, _: &Reload, window: &mut Window, cx: &mut Context<Self>) {
@@ -512,6 +567,16 @@ impl MarkForge {
                     h_flex()
                         .gap_2()
                         .items_center()
+                        .child(
+                            Button::new("sidebar")
+                                .icon(IconName::PanelLeft)
+                                .ghost()
+                                .small()
+                                .tooltip("Toggle sidebar (⌘B)")
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(ToggleSidebar), cx)
+                                }),
+                        )
                         .child(Icon::new(IconName::BookOpen))
                         .child(div().font_semibold().child(self.document_title())),
                 )
@@ -532,7 +597,7 @@ impl MarkForge {
                                 .icon(if editing {
                                     IconName::Eye
                                 } else {
-                                    IconName::PanelLeft
+                                    IconName::PanelRight
                                 })
                                 .label(if editing { "Preview" } else { "Edit" })
                                 .ghost()
@@ -634,6 +699,193 @@ impl MarkForge {
                     ),
                 ),
         )
+    }
+
+    /// VSCode-style file-explorer sidebar.
+    fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let weak = cx.entity().downgrade();
+
+        let header_title = self
+            .file_tree
+            .root()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_uppercase())
+            .unwrap_or_else(|| "EXPLORER".to_string());
+
+        let header = h_flex()
+            .h(px(34.))
+            .w_full()
+            .px_2()
+            .items_center()
+            .justify_between()
+            .border_b_1()
+            .border_color(theme.sidebar_border)
+            .child(
+                div()
+                    .text_xs()
+                    .font_semibold()
+                    .text_color(theme.sidebar_foreground)
+                    .truncate()
+                    .child(header_title),
+            )
+            .child(
+                h_flex()
+                    .gap_0p5()
+                    .child(
+                        Button::new("sb-open")
+                            .icon(IconName::FolderOpen)
+                            .ghost()
+                            .xsmall()
+                            .tooltip("Open Folder (⌘⇧O)")
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(OpenFolder), cx)
+                            }),
+                    )
+                    .when(self.file_tree.is_open(), |this| {
+                        let w1 = weak.clone();
+                        let w2 = weak.clone();
+                        this.child(
+                            Button::new("sb-refresh")
+                                .icon(IconName::Redo)
+                                .ghost()
+                                .xsmall()
+                                .tooltip("Refresh")
+                                .on_click(move |_, _, cx| {
+                                    let _ = w1.update(cx, |this, cx| {
+                                        this.file_tree.refresh();
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new("sb-collapse")
+                                .icon(IconName::ChevronUp)
+                                .ghost()
+                                .xsmall()
+                                .tooltip("Collapse All")
+                                .on_click(move |_, _, cx| {
+                                    let _ = w2.update(cx, |this, cx| {
+                                        this.file_tree.collapse_all();
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                    }),
+            );
+
+        let body = if !self.file_tree.is_open() {
+            v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .p_4()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child("No folder opened"),
+                )
+                .child(
+                    Button::new("sb-open-empty")
+                        .primary()
+                        .small()
+                        .label("Open Folder")
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(OpenFolder), cx)
+                        }),
+                )
+                .into_any_element()
+        } else {
+            let rows = self.file_tree.rows();
+            let current = self.file_path.clone();
+            // macOS system accent blue (selectedContentBackgroundColor), white on top.
+            let accent = gpui::hsla(0.586, 0.92, 0.52, 1.0);
+            let on_accent = gpui::hsla(0., 0., 1., 1.);
+            // A blue tint for hover — clearly visible, ties to the selection.
+            let hover_bg = gpui::hsla(0.586, 0.92, 0.52, 0.24);
+            v_flex()
+                .id("tree-scroll")
+                .size_full()
+                .min_h(px(0.))
+                .py_1()
+                .px_1p5()
+                .overflow_y_scroll()
+                .children(rows.into_iter().map(move |row| {
+                    let path = row.entry.path.clone();
+                    let is_dir = row.entry.is_dir;
+                    let selected = !is_dir && current.as_deref() == Some(path.as_path());
+                    let id = SharedString::from(path.to_string_lossy().to_string());
+
+                    let name_color = if selected { on_accent } else { theme.sidebar_foreground };
+                    let chevron_color = if selected { on_accent } else { theme.muted_foreground };
+                    let icon_color = if selected {
+                        on_accent
+                    } else if is_dir {
+                        theme.foreground
+                    } else {
+                        theme.muted_foreground
+                    };
+
+                    // Leading chevron (folders) or spacer (files).
+                    let lead = if is_dir {
+                        Icon::new(if row.expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .size(px(14.))
+                        .text_color(chevron_color)
+                        .into_any_element()
+                    } else {
+                        div().w(px(14.)).into_any_element()
+                    };
+
+                    let type_icon = Icon::new(if !is_dir {
+                        IconName::File
+                    } else if row.expanded {
+                        IconName::FolderOpen
+                    } else {
+                        IconName::Folder
+                    })
+                    .size(px(15.))
+                    .text_color(icon_color);
+
+                    let weak = weak.clone();
+                    div()
+                        .id(id)
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .h(px(26.))
+                        .rounded_md()
+                        .pl(px(6. + row.depth as f32 * 14.))
+                        .pr_2()
+                        .text_sm()
+                        .text_color(name_color)
+                        .cursor_pointer()
+                        .when(selected, |this| this.bg(accent).font_medium())
+                        .when(!selected, |this| this.hover(|this| this.bg(hover_bg)))
+                        .child(lead)
+                        .child(type_icon)
+                        .child(div().truncate().child(row.entry.name.clone()))
+                        .on_click(move |_, window, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.on_tree_entry(path.clone(), is_dir, window, cx)
+                            });
+                        })
+                }))
+                .into_any_element()
+        };
+
+        v_flex()
+            .size_full()
+            .bg(theme.sidebar)
+            .border_r_1()
+            .border_color(theme.sidebar_border)
+            .child(header)
+            .child(body)
     }
 
     /// Modal Settings panel (appearance, text size, fonts).
@@ -742,10 +994,25 @@ impl Focusable for MarkForge {
 impl Render for MarkForge {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let weak = cx.entity().downgrade();
-        let body = if self.editing {
+        let main_body = if self.editing {
             self.render_split(cx).into_any_element()
         } else {
             self.render_preview(cx).into_any_element()
+        };
+
+        // Optional left sidebar (file explorer), resizable like VSCode.
+        let workspace = if self.sidebar_open {
+            h_resizable("workspace")
+                .child(
+                    resizable_panel()
+                        .size(px(260.))
+                        .size_range(px(180.)..px(460.))
+                        .child(self.render_sidebar(cx)),
+                )
+                .child(resizable_panel().child(div().size_full().child(main_body)))
+                .into_any_element()
+        } else {
+            main_body
         };
 
         v_flex()
@@ -753,10 +1020,12 @@ impl Render for MarkForge {
             .relative()
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_open))
+            .on_action(cx.listener(Self::on_open_folder))
             .on_action(cx.listener(Self::on_open_recent))
             .on_action(cx.listener(Self::on_reload))
             .on_action(cx.listener(Self::on_save))
             .on_action(cx.listener(Self::on_toggle_edit))
+            .on_action(cx.listener(Self::on_toggle_sidebar))
             .on_action(cx.listener(Self::on_toggle_theme))
             .on_action(cx.listener(Self::on_set_theme))
             .on_action(cx.listener(Self::on_toggle_settings))
@@ -771,7 +1040,7 @@ impl Render for MarkForge {
                 }
             })
             .child(self.render_title_bar(cx))
-            .child(div().id("body").flex_1().min_h(px(0.)).w_full().child(body))
+            .child(div().id("body").flex_1().min_h(px(0.)).w_full().child(workspace))
             .when(self.show_settings, |this| this.child(self.render_settings(cx)))
     }
 }

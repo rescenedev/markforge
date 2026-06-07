@@ -11,6 +11,8 @@ Zed's own preview.
 ## Features
 
 - **Native & fast** — GPU-accelerated rendering, instant startup.
+- **File explorer** — VSCode-style sidebar (⌘B). Open a folder (⌘⇧O), browse the
+  tree, click any file to open it.
 - **Viewer + editor** — read full-width, or ⌘E into a resizable split with a
   syntax-highlighted Markdown source editor and live preview.
 - **Live reload** — edit the file in any other app and MarkForge updates it
@@ -50,6 +52,8 @@ cargo run --release -- path/to/notes.md
 | Action               | Key      |
 | -------------------- | -------- |
 | Open file            | ⌘O       |
+| Open folder          | ⌘⇧O      |
+| Toggle sidebar       | ⌘B       |
 | Save                 | ⌘S       |
 | Settings             | ⌘,       |
 | Toggle editor        | ⌘E       |
@@ -84,6 +88,7 @@ cargo build --release
 - [x] Content zoom
 - [x] Light / dark / system theme + persisted settings
 - [x] Recent files
+- [x] File-explorer sidebar (open folder, tree navigation)
 - [ ] Tabs / multiple open documents
 - [ ] `.app` bundle + Finder file association
 - [ ] Outline (table of contents) sidebar
@@ -94,8 +99,10 @@ cargo build --release
 ```
 src/
   main.rs     # app bootstrap: actions, menus, key bindings, window
-  app.rs      # MarkForge view: title bar, editor/preview, zoom, live-reload watcher
-  settings.rs # persisted settings (theme, zoom, recent files)
+  app.rs      # MarkForge view: title bar, sidebar, editor/preview, zoom, watcher
+  file_tree.rs# file-explorer model (open folder, expansion, listings)
+  rem_scaled.rs # element wrapper that scales `rem` for the editor zoom
+  settings.rs # persisted settings (theme, zoom, fonts, recent files)
 assets/
   sample.md   # bundled showcase document
 ```

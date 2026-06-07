@@ -5,6 +5,7 @@
 //! actions, the macOS menu bar, key bindings, persisted settings, and the window.
 
 mod app;
+mod file_tree;
 mod rem_scaled;
 mod settings;
 
@@ -27,9 +28,11 @@ actions!(
     markforge,
     [
         OpenFile,
+        OpenFolder,
         Reload,
         Save,
         ToggleEdit,
+        ToggleSidebar,
         ToggleTheme,
         ToggleSettings,
         FontInc,
@@ -81,6 +84,8 @@ fn register_global_actions(cx: &mut App) {
 fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-o", OpenFile, None),
+        KeyBinding::new("cmd-shift-o", OpenFolder, None),
+        KeyBinding::new("cmd-b", ToggleSidebar, None),
         KeyBinding::new("cmd-r", Reload, None),
         KeyBinding::new("cmd-s", Save, None),
         KeyBinding::new("cmd-e", ToggleEdit, None),
@@ -142,6 +147,7 @@ pub fn set_menus(cx: &mut App) {
             name: "File".into(),
             items: vec![
                 MenuItem::action("Open…", OpenFile),
+                MenuItem::action("Open Folder…", OpenFolder),
                 MenuItem::Submenu(Menu {
                     name: "Open Recent".into(),
                     items: recent_items,
@@ -156,6 +162,7 @@ pub fn set_menus(cx: &mut App) {
         Menu {
             name: "View".into(),
             items: vec![
+                MenuItem::action("Toggle Sidebar", ToggleSidebar),
                 MenuItem::action("Toggle Editor", ToggleEdit),
                 MenuItem::separator(),
                 MenuItem::action("Zoom In", ZoomIn),
