@@ -32,15 +32,12 @@ use crate::file_tree::FileTree;
 use crate::rem_scaled::RemScaled;
 use crate::settings::{FONT_SIZE_MAX, FONT_SIZE_MIN, Settings, ThemePref};
 use crate::{
-    FontDec, FontInc, OpenFile, OpenFolder, OpenRecent, Reload, Save, SetTheme, ToggleEdit,
-    ToggleSettings, ToggleSidebar, ToggleTheme, ZoomIn, ZoomOut, ZoomReset,
+    FontDec, FontInc, OpenFile, OpenFolder, OpenRecent, Reload, Save, SetSyntaxTheme, SetTheme,
+    ToggleEdit, ToggleSettings, ToggleSidebar, ToggleTheme, ZoomIn, ZoomOut, ZoomReset,
 };
 
 /// Bundled showcase document, displayed on first launch.
 const SAMPLE: &str = include_str!("../assets/sample.md");
-
-/// Initial width of the source editor panel in split mode.
-const EDITOR_PANEL_WIDTH: f32 = 540.;
 
 const ZOOM_STEP: f32 = 0.1;
 const ZOOM_MIN: f32 = 0.6;
@@ -138,9 +135,11 @@ impl MarkForge {
         // Apply the persisted theme preference (System resolves to the OS
         // appearance) and keep following the OS while in System mode.
         apply_theme(settings.theme, window, cx);
+        apply_syntax_theme(cx);
         let appearance_sub = window.observe_window_appearance(|window, cx| {
             if cx.global::<Settings>().theme == ThemePref::System {
                 apply_theme(ThemePref::System, window, cx);
+                apply_syntax_theme(cx);
             }
         });
 
@@ -300,17 +299,26 @@ impl MarkForge {
     }
 
     fn on_open(&mut self, _: &OpenFile, window: &mut Window, cx: &mut Context<Self>) {
+        // Allow picking either a Markdown file or a folder.
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
-            directories: false,
+            directories: true,
             multiple: false,
             prompt: Some("Open".into()),
         });
 
         cx.spawn_in(window, async move |this, cx| {
             let path = rx.await.ok()?.ok()??.into_iter().next()?;
-            this.update_in(cx, |this, window, cx| this.load_path(path, window, cx))
-                .ok()?;
+            this.update_in(cx, |this, window, cx| {
+                if path.is_dir() {
+                    this.file_tree.open(path);
+                    this.sidebar_open = true;
+                    cx.notify();
+                } else {
+                    this.load_path(path, window, cx);
+                }
+            })
+            .ok()?;
             Some(())
         })
         .detach();
@@ -324,6 +332,11 @@ impl MarkForge {
     }
 
     fn on_open_folder(&mut self, _: &OpenFolder, window: &mut Window, cx: &mut Context<Self>) {
+        self.prompt_open_folder(window, cx);
+    }
+
+    /// Show the native directory picker and open the chosen folder.
+    fn prompt_open_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -344,8 +357,12 @@ impl MarkForge {
         .detach();
     }
 
-    fn on_toggle_sidebar(&mut self, _: &ToggleSidebar, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_open = !self.sidebar_open;
+        // Opening the sidebar with no folder yet → jump straight to the picker.
+        if self.sidebar_open && !self.file_tree.is_open() {
+            self.prompt_open_folder(window, cx);
+        }
         cx.notify();
     }
 
@@ -480,6 +497,23 @@ impl MarkForge {
         cx.global_mut::<Settings>().theme = pref;
         save_settings(cx);
         apply_theme(pref, window, cx);
+        apply_syntax_theme(cx);
+        cx.notify();
+    }
+
+    fn on_set_syntax_theme(
+        &mut self,
+        action: &SetSyntaxTheme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.global_mut::<Settings>().syntax_theme = action.0.clone();
+        save_settings(cx);
+        // Restore the built-in highlight theme, then override if a preset is set
+        // (so picking "Default" reverts cleanly).
+        let pref = cx.global::<Settings>().theme;
+        apply_theme(pref, window, cx);
+        apply_syntax_theme(cx);
         cx.notify();
     }
 
@@ -653,7 +687,7 @@ impl MarkForge {
             .child(self.styled_markdown(cx))
     }
 
-    /// Split view: source editor on the left, live preview on the right.
+    /// Split view: live preview on the left, source editor on the right.
     fn render_split(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let settings = cx.global::<Settings>();
@@ -668,13 +702,20 @@ impl MarkForge {
         // we zoom it by scaling `rem` for just this subtree (see `RemScaled`). The
         // editor input renders text at 0.875·rem, so divide to hit the target px.
         let editor_rem = px(settings.body_font_size.max(1.0) * self.zoom / 0.875);
+        // Use the highlight theme's editor background (dark slate by default, or
+        // the active preset's bg) so syntax colors read correctly.
+        let editor_bg = theme
+            .highlight_theme
+            .style
+            .editor_background
+            .unwrap_or(theme.background);
         let editor = RemScaled::new(
             editor_rem,
             div()
                 .id("editor")
                 .size_full()
-                .bg(theme.background)
-                .border_r_1()
+                .bg(editor_bg)
+                .border_l_1()
                 .border_color(theme.border)
                 .font_family(editor_font)
                 .child(
@@ -686,9 +727,10 @@ impl MarkForge {
                 ),
         );
 
+        // Both panels are size-less → equal flex → an exact 50/50 split that
+        // tracks the window size (still draggable afterwards).
         div().size_full().child(
             h_resizable("split")
-                .child(resizable_panel().size(px(EDITOR_PANEL_WIDTH)).child(editor))
                 .child(
                     resizable_panel().child(
                         div()
@@ -697,7 +739,8 @@ impl MarkForge {
                             .bg(theme.background)
                             .child(self.styled_markdown(cx)),
                     ),
-                ),
+                )
+                .child(resizable_panel().child(editor)),
         )
     }
 
@@ -894,6 +937,7 @@ impl MarkForge {
         let settings = cx.global::<Settings>();
         let pref = settings.theme;
         let font_size = settings.body_font_size.round() as i32;
+        let syntax = settings.syntax_theme.clone();
 
         div()
             .id("settings-overlay")
@@ -975,6 +1019,16 @@ impl MarkForge {
                         "Editor font",
                         Input::new(&self.editor_font_input).small().w_full(),
                     ))
+                    .child(settings_section(
+                        "Syntax theme (dark)",
+                        h_flex()
+                            .gap_2()
+                            .flex_wrap()
+                            .child(syntax_theme_button("Default", "", syntax.is_empty()))
+                            .children(crate::syntax_theme::PRESETS.iter().map(|&name| {
+                                syntax_theme_button(name, name, syntax == name)
+                            })),
+                    ))
                     .child(
                         div()
                             .text_xs()
@@ -1005,8 +1059,8 @@ impl Render for MarkForge {
             h_resizable("workspace")
                 .child(
                     resizable_panel()
-                        .size(px(260.))
-                        .size_range(px(180.)..px(460.))
+                        .size(px(180.))
+                        .size_range(px(140.)..px(400.))
                         .child(self.render_sidebar(cx)),
                 )
                 .child(resizable_panel().child(div().size_full().child(main_body)))
@@ -1028,6 +1082,7 @@ impl Render for MarkForge {
             .on_action(cx.listener(Self::on_toggle_sidebar))
             .on_action(cx.listener(Self::on_toggle_theme))
             .on_action(cx.listener(Self::on_set_theme))
+            .on_action(cx.listener(Self::on_set_syntax_theme))
             .on_action(cx.listener(Self::on_toggle_settings))
             .on_action(cx.listener(Self::on_font_inc))
             .on_action(cx.listener(Self::on_font_dec))
@@ -1061,6 +1116,18 @@ fn apply_theme(pref: ThemePref, window: &mut Window, cx: &mut App) {
     Theme::change(mode, Some(window), cx);
 }
 
+/// Override the global highlight theme with the chosen syntax preset (if any).
+/// Must run after `apply_theme`, which resets the highlight theme from the registry.
+fn apply_syntax_theme(cx: &mut App) {
+    let name = cx
+        .try_global::<Settings>()
+        .map(|s| s.syntax_theme.clone())
+        .unwrap_or_default();
+    if let Some(theme) = crate::syntax_theme::load(&name) {
+        Theme::global_mut(cx).highlight_theme = theme;
+    }
+}
+
 fn is_dark_appearance(appearance: WindowAppearance) -> bool {
     matches!(
         appearance,
@@ -1090,6 +1157,21 @@ fn theme_pref_button(label: &'static str, value: &'static str, active: bool) -> 
         .small()
         .on_click(move |_, window, cx| {
             window.dispatch_action(Box::new(SetTheme(value.to_string())), cx)
+        });
+    if active {
+        button.primary()
+    } else {
+        button.outline()
+    }
+}
+
+/// A syntax-theme choice; `value` is the preset display name ("" = Default).
+fn syntax_theme_button(label: &'static str, value: &'static str, active: bool) -> Button {
+    let button = Button::new(SharedString::from(format!("syntax-{value}")))
+        .label(label)
+        .xsmall()
+        .on_click(move |_, window, cx| {
+            window.dispatch_action(Box::new(SetSyntaxTheme(value.to_string())), cx)
         });
     if active {
         button.primary()

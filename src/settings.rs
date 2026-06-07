@@ -37,6 +37,8 @@ pub struct Settings {
     pub preview_font: String,
     /// Editor (monospace) font family; empty = theme default.
     pub editor_font: String,
+    /// Syntax-highlighting preset name; empty = the built-in default.
+    pub syntax_theme: String,
     pub recent: Vec<PathBuf>,
 }
 
@@ -48,6 +50,7 @@ impl Default for Settings {
             body_font_size: FONT_SIZE_DEFAULT,
             preview_font: String::new(),
             editor_font: String::new(),
+            syntax_theme: String::new(),
             recent: Vec::new(),
         }
     }

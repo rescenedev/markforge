@@ -8,6 +8,7 @@ mod app;
 mod file_tree;
 mod rem_scaled;
 mod settings;
+mod syntax_theme;
 
 use app::MarkForge;
 use settings::Settings;
@@ -53,6 +54,11 @@ pub struct OpenRecent(pub String);
 #[derive(Clone, PartialEq, Eq, Action, Deserialize)]
 #[action(namespace = markforge, no_json)]
 pub struct SetTheme(pub String);
+
+/// Set the syntax-highlighting preset (display name; "" = built-in default).
+#[derive(Clone, PartialEq, Eq, Action, Deserialize)]
+#[action(namespace = markforge, no_json)]
+pub struct SetSyntaxTheme(pub String);
 
 fn main() {
     let application = gpui_platform::application().with_assets(Assets);
