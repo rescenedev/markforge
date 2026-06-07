@@ -17,8 +17,12 @@ CONTENTS="${APP}/Contents"
 echo "→ building release binary"
 cargo build --release
 
-echo "→ generating icon"
-bash scripts/make_icns.sh
+if [ ! -f assets/icon.icns ]; then
+  echo "→ generating icon"
+  bash scripts/make_icns.sh
+else
+  echo "→ using existing assets/icon.icns"
+fi
 
 echo "→ assembling ${APP} (v${VERSION})"
 rm -rf "${APP}"

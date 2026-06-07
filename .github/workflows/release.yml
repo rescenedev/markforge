@@ -1,0 +1,87 @@
+name: Release
+
+# Tag a version to ship it:
+#   (bump `version` in Cargo.toml, commit) then:
+#   git tag v0.1.2 && git push origin v0.1.2
+#
+# This builds the macOS .app, publishes a GitHub Release with MarkForge.app.zip,
+# and — if the HOMEBREW_TAP_TOKEN secret is set — updates the Homebrew cask.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14 # Apple Silicon runner (arm64)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: rustup show # installs the version from rust-toolchain.toml
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build .app bundle
+        run: ./scripts/bundle.sh
+
+      - name: Read version & checksum
+        id: meta
+        run: |
+          echo "version=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')" >> "$GITHUB_OUTPUT"
+          echo "sha=$(shasum -a 256 target/release/MarkForge.app.zip | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            gh release upload "v$VERSION" target/release/MarkForge.app.zip --clobber
+          else
+            gh release create "v$VERSION" target/release/MarkForge.app.zip \
+              --title "MarkForge v$VERSION" \
+              --notes "Install: \`brew install --cask rescenedev/tap/markforge\`  ·  or download \`MarkForge.app.zip\` below."
+          fi
+
+      - name: Update Homebrew cask
+        if: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          SHA: ${{ steps.meta.outputs.sha }}
+        run: |
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/rescenedev/homebrew-tap.git" tap
+          cat > tap/Casks/markforge.rb <<RB
+          cask "markforge" do
+            version "${VERSION}"
+            sha256 "${SHA}"
+
+            url "https://github.com/rescenedev/markforge/releases/download/v#{version}/MarkForge.app.zip"
+            name "MarkForge"
+            desc "Native macOS Markdown viewer & editor built in Rust on GPUI"
+            homepage "https://github.com/rescenedev/markforge"
+
+            app "MarkForge.app"
+
+            postflight do
+              system_command "/usr/bin/xattr",
+                             args: ["-dr", "com.apple.quarantine", "#{appdir}/MarkForge.app"],
+                             sudo: false
+            end
+
+            zap trash: [
+              "~/Library/Application Support/MarkForge",
+            ]
+          end
+          RB
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/markforge.rb
+          git commit -m "markforge ${VERSION}" || { echo "no changes"; exit 0; }
+          git push
