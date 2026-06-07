@@ -18,6 +18,9 @@ permissions:
 jobs:
   release:
     runs-on: macos-14 # Apple Silicon runner (arm64)
+    env:
+      # Exposed so steps can gate on its presence (secrets aren't allowed in `if`).
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -49,9 +52,8 @@ jobs:
           fi
 
       - name: Update Homebrew cask
-        if: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+        if: ${{ env.TAP_TOKEN != '' }}
         env:
-          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           VERSION: ${{ steps.meta.outputs.version }}
           SHA: ${{ steps.meta.outputs.sha }}
         run: |
