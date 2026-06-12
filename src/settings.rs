@@ -39,6 +39,8 @@ pub struct Settings {
     pub editor_font: String,
     /// Syntax-highlighting preset name; empty = the built-in default.
     pub syntax_theme: String,
+    /// Whether the file-explorer sidebar is shown (default: open).
+    pub sidebar_open: bool,
     pub recent: Vec<PathBuf>,
 }
 
@@ -51,6 +53,7 @@ impl Default for Settings {
             preview_font: String::new(),
             editor_font: String::new(),
             syntax_theme: String::new(),
+            sidebar_open: true,
             recent: Vec::new(),
         }
     }

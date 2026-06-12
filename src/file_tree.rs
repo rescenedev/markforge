@@ -51,11 +51,15 @@ impl FileTree {
         self.root = Some(root);
     }
 
-    /// Toggle a directory's expanded state, reading its contents on first open.
-    pub fn toggle(&mut self, dir: &Path) {
-        if !self.expanded.remove(dir) {
+    /// Toggle a directory's expanded state, reading its contents on first
+    /// open. Returns `true` when the directory is now expanded.
+    pub fn toggle(&mut self, dir: &Path) -> bool {
+        if self.expanded.remove(dir) {
+            false
+        } else {
             self.expanded.insert(dir.to_path_buf());
             self.ensure(dir);
+            true
         }
     }
 

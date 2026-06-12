@@ -15,6 +15,12 @@ Zed's own preview.
   tree, click any file to open it.
 - **Viewer + editor** — read full-width, or ⌘E into a resizable split with a
   syntax-highlighted Markdown source editor and live preview.
+- **JSON too** — open `.json`/`.jsonc` files: minified JSON is pretty-printed,
+  the editor switches to JSON highlighting, and the preview shows a
+  highlighted code view.
+- **docx · hwpx · pdf** — read-only import: Word/HWPX documents convert to
+  Markdown (headings, emphasis, lists, tables), PDFs to extracted text.
+  ⌘S saves a Markdown copy — originals are never overwritten.
 - **Live reload** — edit the file in any other app and MarkForge updates it
   automatically (mtime-polled in the background); debounced so typing stays smooth.
 - **Zoom** — ⌘+/⌘-/⌘0 scales both editor and preview (body, headings, code).

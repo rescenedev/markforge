@@ -9,7 +9,8 @@
 //! Content zoom (⌘+/⌘-/⌘0) scales both panes. Theme preference, zoom, and the
 //! recent-files list are persisted via [`Settings`].
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use gpui::prelude::*;
@@ -22,7 +23,7 @@ use gpui_component::{
     WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    highlighter::Language,
+    highlighter::{HighlightTheme, Language},
     input::{Input, InputEvent, InputState},
     notification::NotificationType,
     resizable::{h_resizable, resizable_panel},
@@ -31,6 +32,7 @@ use gpui_component::{
 };
 
 use crate::file_tree::FileTree;
+use crate::import::{is_imported_doc, read_document};
 use crate::rem_scaled::RemScaled;
 use crate::settings::{FONT_SIZE_MAX, FONT_SIZE_MIN, Settings, ThemePref};
 use crate::{
@@ -52,6 +54,59 @@ const FONT_STEP: f32 = 1.0;
 /// How long to wait after the last keystroke before re-parsing the preview.
 const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(120);
 
+/// Above this many bytes of document text, the *editor* skips syntax
+/// highlighting — tokenizing megabytes of JSON on every edit is too slow.
+const HIGHLIGHT_MAX_BYTES: usize = 1024 * 1024;
+
+/// The preview renders at most this many bytes of a non-Markdown document.
+/// The markdown TextView lays the whole code block out at once (no
+/// virtualization), so a multi-megabyte document beachballs the UI;
+/// a capped preview stays instant and the full text lives in the editor.
+const PREVIEW_MAX_BYTES: usize = 64 * 1024;
+
+/// Per-file size cap for background preloading (on-disk bytes).
+const PRELOAD_MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
+/// Total text budget for one directory preload pass.
+const PRELOAD_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+/// Hard cap on cached documents (stale entries self-heal via mtime check).
+const DOC_CACHE_MAX_ENTRIES: usize = 256;
+
+/// A document preloaded (read + pretty-printed) and ready to apply instantly.
+struct CachedDoc {
+    modified: Option<SystemTime>,
+    text: SharedString,
+}
+
+/// What kind of document the buffer holds, driving highlighter and preview.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DocKind {
+    Markdown,
+    /// `highlight` is false for very large documents (see [`HIGHLIGHT_MAX_BYTES`]).
+    Json { highlight: bool },
+}
+
+impl DocKind {
+    fn editor_language(self) -> &'static str {
+        match self {
+            Self::Markdown => "markdown",
+            Self::Json { highlight: true } => "json",
+            Self::Json { highlight: false } => "text",
+        }
+    }
+
+    fn for_path(path: &std::path::Path) -> Self {
+        match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("json" | "jsonc") => Self::Json { highlight: true },
+            _ => Self::Markdown,
+        }
+    }
+}
+
 /// Decision from a single file-watch poll.
 enum WatchOutcome {
     /// The file changed on disk and a reload should proceed.
@@ -64,8 +119,11 @@ pub struct MarkForge {
     focus_handle: FocusHandle,
     /// The document buffer (Markdown source). Source of truth for the text.
     input_state: gpui::Entity<InputState>,
-    /// Debounced snapshot of the buffer used to render the preview.
+    /// Debounced snapshot of the buffer used to render the preview. For
+    /// non-Markdown documents this holds the fenced-code-block wrapped text.
     preview_text: SharedString,
+    /// Kind of the current document (drives highlighter and preview treatment).
+    doc_kind: DocKind,
     /// Path the current document was loaded from, if any.
     file_path: Option<PathBuf>,
     /// Last observed modification time, used to detect external edits.
@@ -74,6 +132,8 @@ pub struct MarkForge {
     editing: bool,
     /// Whether the buffer has unsaved edits.
     dirty: bool,
+    /// Converted document (docx/hwpx/pdf) — read-only; ⌘S saves a Markdown copy.
+    imported: bool,
     /// Content zoom factor (1.0 == 100%).
     zoom: f32,
     /// File-explorer model (opened folder, expansion, listings).
@@ -90,6 +150,10 @@ pub struct MarkForge {
     preview_task: Option<Task<()>>,
     /// Background poller that live-reloads the current file.
     watch_task: Option<Task<()>>,
+    /// Background-preloaded documents (read + pretty-printed), keyed by path.
+    doc_cache: HashMap<PathBuf, CachedDoc>,
+    /// Monotonic token so a stale async load can't clobber a newer one.
+    load_seq: u64,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -167,34 +231,51 @@ impl MarkForge {
             focus_handle: cx.focus_handle(),
             input_state,
             preview_text: SharedString::default(),
+            doc_kind: DocKind::Markdown,
             file_path: None,
             last_modified: None,
             editing: false,
             dirty: false,
+            imported: false,
             zoom: settings.zoom.clamp(ZOOM_MIN, ZOOM_MAX),
             file_tree: FileTree::new(),
-            sidebar_open: false,
+            sidebar_open: settings.sidebar_open,
             show_settings: false,
             editor_font_input,
             preview_font_input,
             preview_task: None,
             watch_task: None,
+            doc_cache: HashMap::new(),
+            load_seq: 0,
             _subscriptions: vec![input_sub, editor_font_sub, preview_font_sub, appearance_sub],
         };
 
         match initial {
             // A directory argument opens the file-explorer sidebar.
             Some(path) if path.is_dir() => {
-                this.file_tree.open(path);
-                this.sidebar_open = true;
-                this.set_editor_text(SAMPLE, window, cx);
+                this.open_folder(path, cx);
+                this.restore_last_document(window, cx);
             }
             Some(path) => this.load_path(path, window, cx),
-            // Greet the user with the bundled sample document.
-            None => this.set_editor_text(SAMPLE, window, cx),
+            None => this.restore_last_document(window, cx),
         }
 
         this
+    }
+
+    /// Reopen the most recently viewed file; the bundled sample document only
+    /// greets a true first launch (empty recents).
+    fn restore_last_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let last = cx
+            .global::<Settings>()
+            .recent
+            .iter()
+            .find(|p| p.is_file())
+            .cloned();
+        match last {
+            Some(path) => self.load_path(path, window, cx),
+            None => self.set_editor_text(SAMPLE, window, cx),
+        }
     }
 
     /// React to edits: keep the editor responsive immediately, refresh the
@@ -212,7 +293,7 @@ impl MarkForge {
             self.preview_task = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(PREVIEW_DEBOUNCE).await;
                 let _ = this.update(cx, |this, cx| {
-                    let latest = this.input_state.read(cx).value();
+                    let latest = this.wrap_preview(this.input_state.read(cx).value());
                     if this.preview_text != latest {
                         this.preview_text = latest;
                         cx.notify();
@@ -229,10 +310,56 @@ impl MarkForge {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let text = text.into();
+        let mut text = text.into();
+        if matches!(self.doc_kind, DocKind::Json { .. }) {
+            if let Some(pretty) = prettify_minified_json(&text) {
+                text = pretty.into();
+            }
+            // Re-decide editor highlighting on the final (pretty-printed) size.
+            let highlight = text.len() <= HIGHLIGHT_MAX_BYTES;
+            self.set_doc_kind(DocKind::Json { highlight }, cx);
+        }
         self.input_state
             .update(cx, |state, cx| state.set_value(text.clone(), window, cx));
-        self.preview_text = text;
+        self.preview_text = self.wrap_preview(text);
+    }
+
+    /// Markdown renders as-is; JSON is wrapped in a fenced code block so the
+    /// preview shows a highlighted code view. Documents larger than
+    /// [`PREVIEW_MAX_BYTES`] are truncated in the preview (the editor has the
+    /// full text) so opening huge files stays fast.
+    fn wrap_preview(&self, text: SharedString) -> SharedString {
+        match self.doc_kind {
+            DocKind::Markdown => text,
+            DocKind::Json { .. } => {
+                let cut = preview_cut(&text, PREVIEW_MAX_BYTES);
+                // Four backticks so content containing ``` can't break the fence.
+                if cut < text.len() {
+                    let total_kb = text.len() / 1024;
+                    format!(
+                        "````json\n{}\n…\n````\n\n> ⚠️ **Preview truncated** — \
+                         showing the first {} KB of {} KB. \
+                         Open the editor (⌘E) for the full document.",
+                        &text[..cut],
+                        cut / 1024,
+                        total_kb,
+                    )
+                    .into()
+                } else {
+                    format!("````json\n{text}\n````").into()
+                }
+            }
+        }
+    }
+
+    /// Switch the document kind, updating the editor highlighter to match.
+    fn set_doc_kind(&mut self, kind: DocKind, cx: &mut Context<Self>) {
+        if self.doc_kind != kind {
+            self.doc_kind = kind;
+            self.input_state.update(cx, |state, cx| {
+                state.set_highlighter(kind.editor_language(), cx)
+            });
+        }
     }
 
     /// The authoritative buffer contents (not the debounced snapshot).
@@ -240,37 +367,163 @@ impl MarkForge {
         self.input_state.read(cx).value()
     }
 
-    /// Load a Markdown file from disk, watch it, and record it as recent.
+    /// Load a file into the document. Preloaded (cached) files apply
+    /// instantly; everything else is read + pretty-printed on the background
+    /// executor so the UI thread never stalls on a large document.
     fn load_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                self.last_modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-                self.set_editor_text(text, window, cx);
-                self.file_path = Some(path.clone());
-                self.dirty = false;
-                self.start_watch(path.clone(), window, cx);
+        self.load_seq += 1;
+        let seq = self.load_seq;
 
-                cx.global_mut::<Settings>().push_recent(path);
-                save_settings(cx);
-                crate::set_menus(cx);
-            }
-            Err(err) => {
-                self.set_editor_text(
-                    format!("# Couldn't open file\n\n`{}`\n\n```\n{err}\n```", path.display()),
-                    window,
-                    cx,
-                );
-                // Drop unreadable entries from Open Recent so they don't linger.
-                cx.global_mut::<Settings>().recent.retain(|p| p != &path);
-                save_settings(cx);
-                crate::set_menus(cx);
-                self.file_path = Some(path);
-                self.last_modified = None;
-                self.dirty = false;
-                self.watch_task = None;
+        // Cache hit with a fresh mtime → no disk read, no prettify, no wait.
+        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        if modified.is_some() {
+            if let Some(doc) = self.doc_cache.get(&path) {
+                if doc.modified == modified {
+                    let text = doc.text.clone();
+                    self.apply_loaded(path, modified, text, window, cx);
+                    return;
+                }
             }
         }
+
+        let read = {
+            let path = path.clone();
+            cx.background_executor().spawn(async move {
+                let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                read_document(&path).map(|text| (modified, prepare_doc_text(&path, text)))
+            })
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let result = read.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.load_seq != seq {
+                    return; // a newer load superseded this one
+                }
+                match result {
+                    Ok((modified, text)) => {
+                        this.apply_loaded(path.clone(), modified, text.into(), window, cx)
+                    }
+                    Err(err) => this.show_load_error(path.clone(), &err, window, cx),
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Install loaded document text (already pretty-printed) as the current file.
+    fn apply_loaded(
+        &mut self,
+        path: PathBuf,
+        modified: Option<SystemTime>,
+        text: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.last_modified = modified;
+        self.set_doc_kind(DocKind::for_path(&path), cx);
+        self.set_editor_text(text.clone(), window, cx);
+        self.file_path = Some(path.clone());
+        self.dirty = false;
+        self.imported = is_imported_doc(&path);
+        self.start_watch(path.clone(), window, cx);
+
+        if self.doc_cache.len() < DOC_CACHE_MAX_ENTRIES {
+            self.doc_cache.insert(path.clone(), CachedDoc { modified, text });
+        }
+
+        // Populate the sidebar with the file's folder if none is open.
+        if !self.file_tree.is_open() {
+            if let Some(parent) = path.parent() {
+                self.file_tree.open(parent.to_path_buf());
+                self.preload_dir(parent.to_path_buf(), cx);
+            }
+        }
+
+        cx.global_mut::<Settings>().push_recent(path);
+        save_settings(cx);
+        crate::set_menus(cx);
         cx.notify();
+    }
+
+    fn show_load_error(
+        &mut self,
+        path: PathBuf,
+        err: &std::io::Error,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The error document is Markdown regardless of the target file.
+        self.set_doc_kind(DocKind::Markdown, cx);
+        self.set_editor_text(
+            format!("# Couldn't open file\n\n`{}`\n\n```\n{err}\n```", path.display()),
+            window,
+            cx,
+        );
+        // Drop unreadable entries from Open Recent so they don't linger.
+        cx.global_mut::<Settings>().recent.retain(|p| p != &path);
+        save_settings(cx);
+        crate::set_menus(cx);
+        self.file_path = Some(path);
+        self.last_modified = None;
+        self.dirty = false;
+        // Read-only semantics: never let ⌘S overwrite the unreadable original.
+        self.imported = true;
+        self.watch_task = None;
+        cx.notify();
+    }
+
+    /// Read + pretty-print every supported document in `dir` on the
+    /// background executor and stash the results in the cache, so clicking a
+    /// file in the tree applies instantly.
+    fn preload_dir(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        let read_all = cx.background_executor().spawn(async move {
+            let mut docs: Vec<(PathBuf, Option<SystemTime>, String)> = Vec::new();
+            let mut budget = PRELOAD_BUDGET_BYTES;
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                return docs;
+            };
+            for entry in rd.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') || !is_supported_doc(&path) {
+                    continue;
+                }
+                // PDFs convert on demand only — extraction is too costly to
+                // burn on files that may never be clicked.
+                if path.extension().and_then(|e| e.to_str()) == Some("pdf") {
+                    continue;
+                }
+                let Ok(meta) = entry.metadata() else { continue };
+                if !meta.is_file() || meta.len() > PRELOAD_MAX_FILE_BYTES {
+                    continue;
+                }
+                let Ok(text) = read_document(&path) else {
+                    continue;
+                };
+                let modified = meta.modified().ok();
+                let text = prepare_doc_text(&path, text);
+                if text.len() > budget {
+                    break;
+                }
+                budget -= text.len();
+                docs.push((path, modified, text));
+            }
+            docs
+        });
+
+        cx.spawn(async move |this, cx| {
+            let docs = read_all.await;
+            let _ = this.update(cx, |this, _| {
+                for (path, modified, text) in docs {
+                    if this.doc_cache.len() >= DOC_CACHE_MAX_ENTRIES {
+                        break;
+                    }
+                    this.doc_cache
+                        .insert(path, CachedDoc { modified, text: text.into() });
+                }
+            });
+        })
+        .detach();
     }
 
     /// Spawn a background task that re-reads `path` whenever its mtime changes —
@@ -317,7 +570,7 @@ impl MarkForge {
                 let text = {
                     let path = path.clone();
                     cx.background_executor()
-                        .spawn(async move { std::fs::read_to_string(&path) })
+                        .spawn(async move { read_document(&path) })
                         .await
                 };
                 let Ok(text) = text else { continue };
@@ -354,8 +607,9 @@ impl MarkForge {
             return;
         }
 
-        // "Save" needs a destination; an untitled buffer only gets Discard/Cancel.
-        let can_save = self.file_path.is_some();
+        // "Save" needs a writable destination; untitled buffers and imported
+        // (docx/hwpx/pdf) documents only get Discard/Cancel.
+        let can_save = self.file_path.is_some() && !self.imported;
         let answers: &[&str] = if can_save {
             &["Save", "Don't Save", "Cancel"]
         } else {
@@ -396,6 +650,19 @@ impl MarkForge {
         .detach();
     }
 
+    /// Open `path` in the sidebar file tree and record it as recent.
+    fn open_folder(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.file_tree.open(path.clone());
+        self.sidebar_open = true;
+        // New root: stale cache entries are useless now; preload the new dir.
+        self.doc_cache.clear();
+        self.preload_dir(path.clone(), cx);
+        cx.global_mut::<Settings>().push_recent(path);
+        save_settings(cx);
+        crate::set_menus(cx);
+        cx.notify();
+    }
+
     fn on_open(&mut self, _: &OpenFile, window: &mut Window, cx: &mut Context<Self>) {
         self.guard_unsaved(window, cx, |this, window, cx| this.prompt_open(window, cx));
     }
@@ -413,9 +680,7 @@ impl MarkForge {
             let path = rx.await.ok()?.ok()??.into_iter().next()?;
             this.update_in(cx, |this, window, cx| {
                 if path.is_dir() {
-                    this.file_tree.open(path);
-                    this.sidebar_open = true;
-                    cx.notify();
+                    this.open_folder(path, cx);
                 } else {
                     this.load_path(path, window, cx);
                 }
@@ -431,6 +696,10 @@ impl MarkForge {
             return; // the "No Recent Files" placeholder
         }
         let path = PathBuf::from(action.0.clone());
+        if path.is_dir() {
+            self.open_folder(path, cx);
+            return;
+        }
         self.guard_unsaved(window, cx, move |this, window, cx| {
             this.load_path(path, window, cx)
         });
@@ -451,12 +720,8 @@ impl MarkForge {
 
         cx.spawn_in(window, async move |this, cx| {
             let path = rx.await.ok()?.ok()??.into_iter().next()?;
-            this.update_in(cx, |this, _window, cx| {
-                this.file_tree.open(path);
-                this.sidebar_open = true;
-                cx.notify();
-            })
-            .ok()?;
+            this.update_in(cx, |this, _window, cx| this.open_folder(path, cx))
+                .ok()?;
             Some(())
         })
         .detach();
@@ -464,6 +729,8 @@ impl MarkForge {
 
     fn on_toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_open = !self.sidebar_open;
+        cx.global_mut::<Settings>().sidebar_open = self.sidebar_open;
+        save_settings(cx);
         // Opening the sidebar with no folder yet → jump straight to the picker.
         if self.sidebar_open && !self.file_tree.is_open() {
             self.prompt_open_folder(window, cx);
@@ -480,7 +747,10 @@ impl MarkForge {
         cx: &mut Context<Self>,
     ) {
         if is_dir {
-            self.file_tree.toggle(&path);
+            // Expanding a folder warms the cache for its documents.
+            if self.file_tree.toggle(&path) {
+                self.preload_dir(path, cx);
+            }
             cx.notify();
         } else {
             self.guard_unsaved(window, cx, move |this, window, cx| {
@@ -511,14 +781,27 @@ impl MarkForge {
     }
 
     fn on_save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
-        if self.file_path.is_some() {
+        if self.file_path.is_some() && !self.imported {
             self.save_in_place(window, cx);
             return;
         }
 
-        // No backing file yet — prompt for a destination (Save As).
-        let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let rx = cx.prompt_for_new_path(&dir, Some("Untitled.md"));
+        // No writable backing file (untitled, or a converted docx/hwpx/pdf) —
+        // prompt for a destination; imported docs default to a Markdown copy.
+        let dir = self
+            .file_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let default_name = self
+            .file_path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map(|s| format!("{}.md", s.to_string_lossy()))
+            .unwrap_or_else(|| "Untitled.md".to_string());
+        let rx = cx.prompt_for_new_path(&dir, Some(&default_name));
         cx.spawn_in(window, async move |this, cx| {
             let path = rx.await.ok()?.ok()??;
             this.update_in(cx, |this, window, cx| {
@@ -529,6 +812,9 @@ impl MarkForge {
                             std::fs::metadata(&path).and_then(|m| m.modified()).ok();
                         this.file_path = Some(path.clone());
                         this.dirty = false;
+                        this.imported = false;
+                        this.set_doc_kind(DocKind::for_path(&path), cx);
+                        this.preview_text = this.wrap_preview(this.text(cx));
                         this.start_watch(path.clone(), window, cx);
                         cx.global_mut::<Settings>().push_recent(path);
                         save_settings(cx);
@@ -547,6 +833,9 @@ impl MarkForge {
     /// Write the buffer to its backing file. Reports failure via a notification
     /// and returns whether the write succeeded.
     fn save_in_place(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.imported {
+            return false; // never overwrite a docx/hwpx/pdf original
+        }
         let Some(path) = self.file_path.clone() else {
             return false;
         };
@@ -1236,9 +1525,7 @@ impl Render for MarkForge {
                 let _ = weak.update(cx, |this, cx| {
                     // A dropped folder opens in the sidebar instead of erroring.
                     if path.is_dir() {
-                        this.file_tree.open(path.clone());
-                        this.sidebar_open = true;
-                        cx.notify();
+                        this.open_folder(path.clone(), cx);
                     } else {
                         this.guard_unsaved(window, cx, move |this, window, cx| {
                             this.load_path(path, window, cx)
@@ -1268,16 +1555,24 @@ fn apply_theme(pref: ThemePref, window: &mut Window, cx: &mut App) {
     Theme::change(mode, Some(window), cx);
 }
 
-/// Override the global highlight theme with the chosen syntax preset (if any).
-/// Must run after `apply_theme`, which resets the highlight theme from the registry.
+/// Set the global highlight theme: the chosen syntax preset if any, otherwise
+/// the built-in theme matching the current mode. Always setting it explicitly
+/// matters — `Theme::change` keeps the previous highlight theme when the new
+/// mode's config carries none, which left light syntax colors (near-invisible
+/// `#333` keys) on a dark background.
 fn apply_syntax_theme(cx: &mut App) {
     let name = cx
         .try_global::<Settings>()
         .map(|s| s.syntax_theme.clone())
         .unwrap_or_default();
-    if let Some(theme) = crate::syntax_theme::load(&name) {
-        Theme::global_mut(cx).highlight_theme = theme;
-    }
+    let theme = crate::syntax_theme::load(&name).unwrap_or_else(|| {
+        if Theme::global(cx).mode.is_dark() {
+            HighlightTheme::default_dark()
+        } else {
+            HighlightTheme::default_light()
+        }
+    });
+    Theme::global_mut(cx).highlight_theme = theme;
 }
 
 fn is_dark_appearance(appearance: WindowAppearance) -> bool {
@@ -1291,6 +1586,65 @@ fn save_settings(cx: &App) {
     if let Some(settings) = cx.try_global::<Settings>() {
         settings.save();
     }
+}
+
+/// Document extensions MarkForge knows how to display.
+fn is_supported_doc(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                "md" | "markdown"
+                    | "mdown"
+                    | "mkd"
+                    | "text"
+                    | "txt"
+                    | "json"
+                    | "jsonc"
+                    | "docx"
+                    | "hwpx"
+                    | "pdf"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// Make raw file text ready for the buffer: minified JSON gets pretty-printed,
+/// everything else passes through. Safe to run on the background executor.
+fn prepare_doc_text(path: &Path, text: String) -> String {
+    if matches!(DocKind::for_path(path), DocKind::Json { .. }) {
+        prettify_minified_json(&text).unwrap_or(text)
+    } else {
+        text
+    }
+}
+
+/// Largest byte index ≤ `max` that falls on a line (or char) boundary, so a
+/// truncated preview never cuts mid-line or mid-codepoint.
+fn preview_cut(text: &str, max: usize) -> usize {
+    if text.len() <= max {
+        return text.len();
+    }
+    if let Some(nl) = text.as_bytes()[..max].iter().rposition(|&b| b == b'\n') {
+        return nl;
+    }
+    let mut cut = max;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    cut
+}
+
+/// Pretty-print JSON that was squeezed onto a single line (no newline in the
+/// first 4 KiB). Already-formatted documents pass through untouched, and
+/// anything that doesn't parse (e.g. JSONC comments) stays as-is.
+fn prettify_minified_json(text: &str) -> Option<String> {
+    if text.as_bytes().iter().take(4096).any(|&b| b == b'\n') {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    serde_json::to_string_pretty(&value).ok()
 }
 
 /// Surface a failed write as an in-window error notification.
@@ -1343,18 +1697,11 @@ fn syntax_theme_button(label: &'static str, value: &'static str, active: bool) -
     }
 }
 
-/// Pick the best path from a drop: a Markdown-ish file if present, else the first.
+/// Pick the best path from a drop: a supported document if present, else the first.
 fn first_markdown(paths: &[PathBuf]) -> Option<PathBuf> {
-    let is_md = |p: &&PathBuf| {
-        p.extension()
-            .and_then(|e| e.to_str())
-            .map(|e| {
-                matches!(
-                    e.to_ascii_lowercase().as_str(),
-                    "md" | "markdown" | "mdown" | "mkd" | "text" | "txt"
-                )
-            })
-            .unwrap_or(false)
-    };
-    paths.iter().find(is_md).or_else(|| paths.first()).cloned()
+    paths
+        .iter()
+        .find(|p| is_supported_doc(p))
+        .or_else(|| paths.first())
+        .cloned()
 }
