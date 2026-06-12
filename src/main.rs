@@ -46,6 +46,11 @@ actions!(
         TreeLeft,
         TreeRight,
         TreeConfirm,
+        ToggleDiff,
+        CommitAll,
+        GitPush,
+        GitPull,
+        DiscardChanges,
         CloseWindow,
         Quit
     ]
@@ -117,6 +122,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-e", ToggleEdit, None),
         KeyBinding::new("cmd-,", ToggleSettings, None),
         KeyBinding::new("cmd-shift-l", ToggleTheme, None),
+        KeyBinding::new("cmd-d", ToggleDiff, None),
         // Zoom. Accept both the bare `=`/`+` keys so ⌘+ works with or without Shift.
         KeyBinding::new("cmd-=", ZoomIn, None),
         KeyBinding::new("cmd-+", ZoomIn, None),
@@ -192,6 +198,17 @@ pub fn set_menus(cx: &mut App) {
                 MenuItem::action("Reload", Reload),
                 MenuItem::separator(),
                 MenuItem::action("Close Window", CloseWindow),
+            ],
+            disabled: false,
+        },
+        Menu {
+            name: "Git".into(),
+            items: vec![
+                MenuItem::action("Show Diff", ToggleDiff),
+                MenuItem::action("Discard File Changes…", DiscardChanges),
+                MenuItem::separator(),
+                MenuItem::action("Push", GitPush),
+                MenuItem::action("Pull", GitPull),
             ],
             disabled: false,
         },

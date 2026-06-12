@@ -42,6 +42,8 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "
     "tree-sitter-css",
     "tree-sitter-yaml",
     "tree-sitter-toml",
+    # `git diff` output in the diff preview (⌘D).
+    "tree-sitter-diff",
 ] }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "70d2c44bd62ab16adf3cb791bf776e53d5ea312b" }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }

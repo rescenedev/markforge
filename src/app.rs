@@ -38,9 +38,10 @@ use crate::import::{is_imported_doc, is_supported_doc, read_document};
 use crate::rem_scaled::RemScaled;
 use crate::settings::{Settings, ThemePref, parse_hex_color};
 use crate::{
-    CheckoutBranch, CloseWindow, OpenFile, OpenFolder, OpenRecent, Quit, Reload, Save,
-    SetSyntaxTheme, SetTheme, ToggleEdit, ToggleSettings, ToggleSidebar, ToggleTheme, TreeConfirm,
-    TreeDown, TreeLeft, TreeRight, TreeUp, ZoomIn, ZoomOut, ZoomReset,
+    CheckoutBranch, CloseWindow, CommitAll, DiscardChanges, GitPull, GitPush, OpenFile,
+    OpenFolder, OpenRecent, Quit, Reload, Save, SetSyntaxTheme, SetTheme, ToggleDiff, ToggleEdit,
+    ToggleSettings, ToggleSidebar, ToggleTheme, TreeConfirm, TreeDown, TreeLeft, TreeRight,
+    TreeUp, ZoomIn, ZoomOut, ZoomReset,
 };
 
 /// Bundled showcase document, displayed on first launch.
@@ -174,6 +175,10 @@ pub struct MarkForge {
     git: std::rc::Rc<RepoStatus>,
     /// Background poller that refreshes `git`.
     git_task: Option<Task<()>>,
+    /// When set, the preview shows this `git diff` instead of the document.
+    diff_preview: Option<SharedString>,
+    /// Commit-message field at the bottom of the sidebar.
+    commit_input: gpui::Entity<InputState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -190,6 +195,18 @@ impl MarkForge {
         });
 
         let input_sub = cx.subscribe(&input_state, Self::on_input_event);
+
+        let commit_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Commit message…"));
+        let commit_sub = cx.subscribe_in(
+            &commit_input,
+            window,
+            |this, _state, ev: &InputEvent, window, cx| {
+                if matches!(ev, InputEvent::PressEnter { .. }) {
+                    this.on_commit_all(&CommitAll, window, cx);
+                }
+            },
+        );
 
         // Apply the persisted theme preference (System resolves to the OS
         // appearance) and keep following the OS while in System mode.
@@ -239,7 +256,9 @@ impl MarkForge {
             load_seq: 0,
             git: std::rc::Rc::new(RepoStatus::default()),
             git_task: None,
-            _subscriptions: vec![input_sub, appearance_sub],
+            diff_preview: None,
+            commit_input,
+            _subscriptions: vec![input_sub, commit_sub, appearance_sub],
         };
 
         match initial {
@@ -280,6 +299,7 @@ impl MarkForge {
     ) {
         if matches!(event, InputEvent::Change) {
             self.dirty = true;
+            self.diff_preview = None; // editing leaves the diff view
             cx.notify(); // editor repaints now; preview keeps its cached text
 
             self.preview_task = Some(cx.spawn(async move |this, cx| {
@@ -414,6 +434,7 @@ impl MarkForge {
         cx: &mut Context<Self>,
     ) {
         self.last_modified = modified;
+        self.diff_preview = None;
         self.set_doc_kind(DocKind::for_path(&path), cx);
         self.set_editor_text(text.clone(), window, cx);
         self.file_path = Some(path.clone());
@@ -715,6 +736,204 @@ impl MarkForge {
             })
             .detach();
         });
+    }
+
+    /// The directory git commands should run in (repo root, else tree root).
+    fn git_dir(&self) -> Option<PathBuf> {
+        self.git
+            .root
+            .clone()
+            .or_else(|| self.file_tree.root().map(Path::to_path_buf))
+    }
+
+    /// ⌘D — toggle a `git diff HEAD` view of the current file in the preview.
+    fn on_toggle_diff(&mut self, _: &ToggleDiff, window: &mut Window, cx: &mut Context<Self>) {
+        if self.diff_preview.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let Some(path) = self.file_path.clone() else { return };
+        let Some(dir) = self.git_dir() else {
+            window.push_notification((NotificationType::Info, "Not inside a git repository"), cx);
+            return;
+        };
+
+        let diff = {
+            let dir = dir.clone();
+            cx.background_executor().spawn(async move {
+                crate::git::git(&dir, &["diff", "HEAD", "--", &path.to_string_lossy()])
+            })
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let result = diff.await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(out) if out.trim().is_empty() => {
+                    window.push_notification(
+                        (NotificationType::Info, "No changes against HEAD"),
+                        cx,
+                    );
+                }
+                Ok(out) => {
+                    let cut = preview_cut(&out, PREVIEW_MAX_BYTES);
+                    this.diff_preview =
+                        Some(format!("````diff\n{}\n````", &out[..cut]).into());
+                    cx.notify();
+                }
+                Err(err) => window.push_notification(
+                    (NotificationType::Error, format!("git diff failed: {err}")),
+                    cx,
+                ),
+            });
+        })
+        .detach();
+    }
+
+    /// Stage everything and commit with the sidebar message (⏎ in the field).
+    fn on_commit_all(&mut self, _: &CommitAll, window: &mut Window, cx: &mut Context<Self>) {
+        let message = self.commit_input.read(cx).value().trim().to_string();
+        if message.is_empty() {
+            window.push_notification((NotificationType::Warning, "Commit message is empty"), cx);
+            return;
+        }
+        let Some(dir) = self.git_dir() else { return };
+
+        // Make sure on-disk state matches the buffer before staging.
+        if self.dirty {
+            self.save_in_place(window, cx);
+        }
+
+        let commit = {
+            let dir = dir.clone();
+            let message = message.clone();
+            cx.background_executor()
+                .spawn(async move { crate::git::commit_all(&dir, &message) })
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let result = commit.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(summary) => {
+                        this.commit_input
+                            .update(cx, |state, cx| state.set_value("", window, cx));
+                        this.start_git_poll(dir.clone(), cx);
+                        window.push_notification((NotificationType::Success, summary), cx);
+                    }
+                    Err(err) => window.push_notification(
+                        (NotificationType::Error, format!("Commit failed: {err}")),
+                        cx,
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn on_git_push(&mut self, _: &GitPush, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_git_remote(&["push"], "Pushed", window, cx);
+    }
+
+    fn on_git_pull(&mut self, _: &GitPull, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_git_remote(&["pull", "--ff-only"], "Pulled", window, cx);
+    }
+
+    /// Run a network git command and report the outcome as a notification.
+    fn run_git_remote(
+        &mut self,
+        args: &[&'static str],
+        verb: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dir) = self.git_dir() else {
+            window.push_notification((NotificationType::Info, "Not inside a git repository"), cx);
+            return;
+        };
+        let args: Vec<&'static str> = args.to_vec();
+        let run = {
+            let dir = dir.clone();
+            cx.background_executor()
+                .spawn(async move { crate::git::git(&dir, &args) })
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let result = run.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(_) => {
+                        // Pulled files may have changed on disk.
+                        this.file_tree.refresh();
+                        this.doc_cache.clear();
+                        this.start_git_poll(dir.clone(), cx);
+                        window.push_notification((NotificationType::Success, verb), cx);
+                    }
+                    Err(err) => window.push_notification(
+                        (NotificationType::Error, format!("git failed: {err}")),
+                        cx,
+                    ),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Throw away worktree changes to the current file (after a confirm).
+    fn on_discard(&mut self, _: &DiscardChanges, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.file_path.clone() else { return };
+        let Some(dir) = self.git_dir() else { return };
+        match self.git.state_of(&path) {
+            None => {
+                window.push_notification((NotificationType::Info, "File has no changes"), cx);
+                return;
+            }
+            Some(FileState::Untracked) => {
+                window.push_notification(
+                    (NotificationType::Info, "Untracked file — nothing to restore"),
+                    cx,
+                );
+                return;
+            }
+            _ => {}
+        }
+
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let rx = window.prompt(
+            PromptLevel::Warning,
+            &format!("Discard changes to {name}?"),
+            Some("The file will be restored to its last committed state."),
+            &["Discard", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if rx.await != Ok(0) {
+                return;
+            }
+            let restore = {
+                let dir = dir.clone();
+                let file = path.to_string_lossy().to_string();
+                cx.background_executor().spawn(async move {
+                    crate::git::git(&dir, &["checkout", "--", &file])
+                })
+            };
+            let result = restore.await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(_) => {
+                    this.dirty = false;
+                    this.diff_preview = None;
+                    this.doc_cache.remove(&path);
+                    this.load_path(path.clone(), window, cx);
+                    this.start_git_poll(dir.clone(), cx);
+                }
+                Err(err) => window.push_notification(
+                    (NotificationType::Error, format!("Discard failed: {err}")),
+                    cx,
+                ),
+            });
+        })
+        .detach();
     }
 
     /// Poll `git status` for `dir` on the background executor, updating the
@@ -1158,7 +1377,7 @@ impl MarkForge {
         let body = settings.body_font_size.max(1.0) * zoom;
         let preview_font = settings.preview_font.clone();
         let pad = px(settings.preview_padding.clamp(0.0, 64.0));
-        let is_code_doc = !matches!(self.doc_kind, DocKind::Markdown);
+        let is_code_doc = self.diff_preview.is_some() || !matches!(self.doc_kind, DocKind::Markdown);
 
         // Scale fenced code blocks too (they otherwise use the fixed mono size).
         let mut code_block = StyleRefinement::default();
@@ -1180,7 +1399,11 @@ impl MarkForge {
             ..Default::default()
         };
 
-        markdown(self.preview_text.clone())
+        let preview_text = self
+            .diff_preview
+            .clone()
+            .unwrap_or_else(|| self.preview_text.clone());
+        markdown(preview_text)
             .style(style)
             .scrollable(true)
             .selectable(true)
@@ -1636,6 +1859,68 @@ impl MarkForge {
                 .into_any_element()
         };
 
+        // Commit panel: only when the open folder is a git repository.
+        let commit_panel = self.git.root.is_some().then(|| {
+            let changes = self.git.files.len();
+            v_flex()
+                .flex_none()
+                .w_full()
+                .p_2()
+                .gap_1p5()
+                .border_t_1()
+                .border_color(theme.sidebar_border)
+                .child(
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .justify_between()
+                        .child(div().text_xs().text_color(theme.muted_foreground).child(
+                            match changes {
+                                0 => "No changes".to_string(),
+                                1 => "1 change".to_string(),
+                                n => format!("{n} changes"),
+                            },
+                        ))
+                        .child(
+                            h_flex()
+                                .gap_0p5()
+                                .child(
+                                    Button::new("git-pull")
+                                        .label("↓")
+                                        .ghost()
+                                        .xsmall()
+                                        .tooltip("Pull (fast-forward)")
+                                        .on_click(|_, window, cx| {
+                                            window.dispatch_action(Box::new(GitPull), cx)
+                                        }),
+                                )
+                                .child(
+                                    Button::new("git-push")
+                                        .label("↑")
+                                        .ghost()
+                                        .xsmall()
+                                        .tooltip("Push")
+                                        .on_click(|_, window, cx| {
+                                            window.dispatch_action(Box::new(GitPush), cx)
+                                        }),
+                                ),
+                        ),
+                )
+                .child(Input::new(&self.commit_input).small().w_full())
+                .when(changes > 0, |this| {
+                    this.child(
+                        Button::new("git-commit")
+                            .primary()
+                            .small()
+                            .w_full()
+                            .label("Commit all")
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(CommitAll), cx)
+                            }),
+                    )
+                })
+        });
+
         v_flex()
             .size_full()
             .bg(sidebar_bg)
@@ -1643,6 +1928,7 @@ impl MarkForge {
             .border_color(theme.sidebar_border)
             .child(header)
             .child(body)
+            .children(commit_panel)
     }
 
 }
@@ -1722,6 +2008,11 @@ impl Render for MarkForge {
             .on_action(cx.listener(Self::on_tree_right))
             .on_action(cx.listener(Self::on_tree_confirm))
             .on_action(cx.listener(Self::on_checkout_branch))
+            .on_action(cx.listener(Self::on_toggle_diff))
+            .on_action(cx.listener(Self::on_commit_all))
+            .on_action(cx.listener(Self::on_git_push))
+            .on_action(cx.listener(Self::on_git_pull))
+            .on_action(cx.listener(Self::on_discard))
             .on_action(cx.listener(Self::on_close_window))
             .on_action(cx.listener(Self::on_quit))
             .on_drop::<ExternalPaths>(move |paths, window, cx| {

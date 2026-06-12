@@ -69,6 +69,18 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Stage everything and commit with `message`. Returns git's summary line.
+pub fn commit_all(dir: &Path, message: &str) -> Result<String, String> {
+    git(dir, &["add", "-A"])?;
+    git(dir, &["commit", "-m", message]).map(|out| {
+        out.lines()
+            .next()
+            .unwrap_or("committed")
+            .trim()
+            .to_string()
+    })
+}
+
 /// Full status snapshot for the repository containing `dir`.
 pub fn repo_status(dir: &Path) -> RepoStatus {
     let Ok(root) = git(dir, &["rev-parse", "--show-toplevel"]) else {
