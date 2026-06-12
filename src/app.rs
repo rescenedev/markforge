@@ -23,6 +23,7 @@ use gpui_component::{
     WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    menu::DropdownMenu as _,
     highlighter::{HighlightTheme, Language},
     input::{Input, InputEvent, InputState},
     notification::NotificationType,
@@ -32,13 +33,14 @@ use gpui_component::{
 };
 
 use crate::file_tree::FileTree;
+use crate::git::{FileState, RepoStatus};
 use crate::import::{is_imported_doc, is_supported_doc, read_document};
 use crate::rem_scaled::RemScaled;
 use crate::settings::{Settings, ThemePref, parse_hex_color};
 use crate::{
-    CloseWindow, OpenFile, OpenFolder, OpenRecent, Quit, Reload, Save, SetSyntaxTheme, SetTheme,
-    ToggleEdit, ToggleSettings, ToggleSidebar, ToggleTheme, TreeConfirm, TreeDown, TreeLeft,
-    TreeRight, TreeUp, ZoomIn, ZoomOut, ZoomReset,
+    CheckoutBranch, CloseWindow, OpenFile, OpenFolder, OpenRecent, Quit, Reload, Save,
+    SetSyntaxTheme, SetTheme, ToggleEdit, ToggleSettings, ToggleSidebar, ToggleTheme, TreeConfirm,
+    TreeDown, TreeLeft, TreeRight, TreeUp, ZoomIn, ZoomOut, ZoomReset,
 };
 
 /// Bundled showcase document, displayed on first launch.
@@ -168,6 +170,10 @@ pub struct MarkForge {
     doc_cache: HashMap<PathBuf, CachedDoc>,
     /// Monotonic token so a stale async load can't clobber a newer one.
     load_seq: u64,
+    /// Latest git snapshot for the open folder (default = not a repo).
+    git: std::rc::Rc<RepoStatus>,
+    /// Background poller that refreshes `git`.
+    git_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -231,6 +237,8 @@ impl MarkForge {
             watch_task: None,
             doc_cache: HashMap::new(),
             load_seq: 0,
+            git: std::rc::Rc::new(RepoStatus::default()),
+            git_task: None,
             _subscriptions: vec![input_sub, appearance_sub],
         };
 
@@ -422,6 +430,7 @@ impl MarkForge {
             if let Some(parent) = path.parent() {
                 self.file_tree.open(parent.to_path_buf());
                 self.preload_dir(parent.to_path_buf(), cx);
+                self.start_git_poll(parent.to_path_buf(), cx);
             }
         }
 
@@ -648,10 +657,92 @@ impl MarkForge {
         // New root: stale cache entries are useless now; preload the new dir.
         self.doc_cache.clear();
         self.preload_dir(path.clone(), cx);
+        self.start_git_poll(path.clone(), cx);
         cx.global_mut::<Settings>().push_recent(path);
         save_settings(cx);
         crate::set_menus(cx);
         cx.notify();
+    }
+
+    /// Check out a branch via `git switch`, then refresh the tree and status.
+    fn on_checkout_branch(
+        &mut self,
+        action: &CheckoutBranch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let branch = action.0.clone();
+        let Some(dir) = self
+            .git
+            .root
+            .clone()
+            .or_else(|| self.file_tree.root().map(Path::to_path_buf))
+        else {
+            return;
+        };
+
+        self.guard_unsaved(window, cx, move |_, window, cx| {
+            let switch = {
+                let dir = dir.clone();
+                let branch = branch.clone();
+                cx.background_executor()
+                    .spawn(async move { crate::git::git(&dir, &["switch", &branch]) })
+            };
+            cx.spawn_in(window, async move |this, cx| {
+                let result = switch.await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    match result {
+                        Ok(_) => {
+                            // Files may have appeared/changed under the new branch.
+                            this.file_tree.refresh();
+                            this.doc_cache.clear();
+                            this.start_git_poll(dir.clone(), cx);
+                            window.push_notification(
+                                (
+                                    NotificationType::Success,
+                                    format!("Switched to branch {branch}"),
+                                ),
+                                cx,
+                            );
+                        }
+                        Err(err) => window.push_notification(
+                            (NotificationType::Error, format!("git switch failed: {err}")),
+                            cx,
+                        ),
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        });
+    }
+
+    /// Poll `git status` for `dir` on the background executor, updating the
+    /// snapshot whenever it changes. Replaces any previous poller.
+    fn start_git_poll(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        let task = cx.spawn(async move |this, cx| {
+            loop {
+                let status = {
+                    let dir = dir.clone();
+                    cx.background_executor()
+                        .spawn(async move { crate::git::repo_status(&dir) })
+                        .await
+                };
+                let alive = this.update(cx, |this, cx| {
+                    if *this.git != status {
+                        this.git = std::rc::Rc::new(status);
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(2500))
+                    .await;
+            }
+        });
+        self.git_task = Some(task);
     }
 
     fn on_open(&mut self, _: &OpenFile, window: &mut Window, cx: &mut Context<Self>) {
@@ -1303,12 +1394,46 @@ impl MarkForge {
             .border_b_1()
             .border_color(theme.sidebar_border)
             .child(
-                div()
-                    .text_xs()
-                    .font_semibold()
-                    .text_color(theme.sidebar_foreground)
-                    .truncate()
-                    .child(header_title),
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .min_w(px(0.))
+                    // Branch chip leads; click it to switch branches.
+                    .when_some(self.git.branch.clone(), |this, branch| {
+                        let branches = self.git.branches.clone();
+                        let current = branch.clone();
+                        this.child(
+                            Button::new("branch")
+                                .label(format!("⎇ {branch}"))
+                                .ghost()
+                                .xsmall()
+                                .tooltip("Switch branch")
+                                .dropdown_menu(move |mut menu, _, _| {
+                                    for b in &branches {
+                                        let here = *b == current;
+                                        let label = if here {
+                                            format!("✓ {b}")
+                                        } else {
+                                            b.clone()
+                                        };
+                                        menu = menu.menu_with_disabled(
+                                            label,
+                                            Box::new(CheckoutBranch(b.clone())),
+                                            here,
+                                        );
+                                    }
+                                    menu
+                                }),
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(theme.sidebar_foreground)
+                            .truncate()
+                            .child(header_title),
+                    ),
             )
             .child(
                 h_flex()
@@ -1382,6 +1507,7 @@ impl MarkForge {
             let rows = self.file_tree.rows();
             let current = self.file_path.clone();
             let cursor = self.tree_cursor.clone();
+            let git = self.git.clone();
             // macOS system accent blue (selectedContentBackgroundColor), white on top.
             let accent = gpui::hsla(0.586, 0.92, 0.52, 1.0);
             let on_accent = gpui::hsla(0., 0., 1., 1.);
@@ -1404,7 +1530,23 @@ impl MarkForge {
                     let at_cursor = cursor.as_deref() == Some(path.as_path());
                     let id = SharedString::from(path.to_string_lossy().to_string());
 
-                    let name_color = if selected { on_accent } else { theme.sidebar_foreground };
+                    // Git decorations (VSCode palette): badge + name tint.
+                    let git_state = git.state_of(&path);
+                    let dir_dirty = is_dir && git_state.is_none() && git.dir_is_dirty(&path);
+                    let git_color = git_state.map(|s| match s {
+                        FileState::Conflicted => gpui::hsla(0.0, 0.85, 0.62, 1.0),
+                        FileState::Modified => gpui::hsla(0.105, 0.59, 0.72, 1.0),
+                        FileState::Staged => gpui::hsla(0.36, 0.42, 0.62, 1.0),
+                        FileState::Untracked => gpui::hsla(0.39, 0.42, 0.62, 1.0),
+                    });
+
+                    let name_color = if selected {
+                        on_accent
+                    } else if let Some(c) = git_color {
+                        c
+                    } else {
+                        theme.sidebar_foreground
+                    };
                     let chevron_color = if selected { on_accent } else { theme.muted_foreground };
                     let icon_color = if selected {
                         on_accent
@@ -1456,7 +1598,35 @@ impl MarkForge {
                         .when(!selected, |this| this.hover(|this| this.bg(hover_bg)))
                         .child(lead)
                         .child(type_icon)
-                        .child(div().truncate().child(row.entry.name.clone()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
+                                .child(row.entry.name.clone()),
+                        )
+                        .when_some(git_state, |this, state| {
+                            this.child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(if selected {
+                                        on_accent
+                                    } else {
+                                        git_color.unwrap_or(theme.muted_foreground)
+                                    })
+                                    .child(state.badge()),
+                            )
+                        })
+                        .when(dir_dirty, |this| {
+                            this.child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(gpui::hsla(0.105, 0.59, 0.72, 1.0))
+                                    .child("•"),
+                            )
+                        })
                         .on_click(move |_, window, cx| {
                             let _ = weak.update(cx, |this, cx| {
                                 this.on_tree_entry(path.clone(), is_dir, window, cx)
@@ -1551,6 +1721,7 @@ impl Render for MarkForge {
             .on_action(cx.listener(Self::on_tree_left))
             .on_action(cx.listener(Self::on_tree_right))
             .on_action(cx.listener(Self::on_tree_confirm))
+            .on_action(cx.listener(Self::on_checkout_branch))
             .on_action(cx.listener(Self::on_close_window))
             .on_action(cx.listener(Self::on_quit))
             .on_drop::<ExternalPaths>(move |paths, window, cx| {

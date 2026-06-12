@@ -6,6 +6,7 @@
 
 mod app;
 mod file_tree;
+mod git;
 mod import;
 mod rem_scaled;
 mod settings;
@@ -64,6 +65,11 @@ pub struct SetTheme(pub String);
 #[derive(Clone, PartialEq, Eq, Action, Deserialize)]
 #[action(namespace = markforge, no_json)]
 pub struct SetSyntaxTheme(pub String);
+
+/// Check out the named git branch in the open folder's repository.
+#[derive(Clone, PartialEq, Eq, Action, Deserialize)]
+#[action(namespace = markforge, no_json)]
+pub struct CheckoutBranch(pub String);
 
 fn main() {
     let application = gpui_platform::application().with_assets(Assets);
