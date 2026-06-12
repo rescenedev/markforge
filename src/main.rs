@@ -8,6 +8,7 @@ mod app;
 mod file_tree;
 mod git;
 mod import;
+mod pdf;
 mod rem_scaled;
 mod settings;
 mod syntax_theme;

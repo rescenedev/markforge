@@ -804,8 +804,20 @@ impl Paragraph {
                         .into_any_element(),
                     );
                 }
+                // MarkForge patch: absolute / file:// image paths load from
+                // disk; only real URLs go through the HTTP client.
+                let image_source: gpui::ImageSource = {
+                    let url: &str = &image.url;
+                    if let Some(stripped) = url.strip_prefix("file://") {
+                        std::path::PathBuf::from(stripped).into()
+                    } else if url.starts_with('/') {
+                        std::path::PathBuf::from(url).into()
+                    } else {
+                        image.url.clone().into()
+                    }
+                };
                 child_nodes.push(
-                    img(image.url.clone())
+                    img(image_source)
                         .id(ix)
                         .object_fit(ObjectFit::Contain)
                         .max_w(relative(1.))

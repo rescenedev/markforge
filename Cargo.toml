@@ -49,6 +49,9 @@ gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", 
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 quick-xml = "0.39"
 pdf-extract = "0.10.0"
+objc2-core-graphics = "0.3.2"
+objc2-core-foundation = "0.3.2"
+png = "0.18.1"
 
 # Use a local, lightly-patched copy of gpui-component (task-list checkbox
 # alignment fix in crates/ui/src/text/node.rs). Same revision as the git dep.

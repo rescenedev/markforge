@@ -46,7 +46,9 @@ pub fn read_document(path: &Path) -> io::Result<String> {
     let text = match ext_lowercase(path).as_deref() {
         Some("docx") => docx_to_markdown(path)?,
         Some("hwpx") => hwpx_to_markdown(path)?,
-        Some("pdf") => pdf_to_text(path)?,
+        // Real page rendering via CoreGraphics; text extraction is the
+        // fallback for PDFs CoreGraphics can't open.
+        Some("pdf") => crate::pdf::pdf_to_markdown_pages(path).or_else(|_| pdf_to_text(path))?,
         _ => return std::fs::read_to_string(path),
     };
     Ok(truncate_converted(text))

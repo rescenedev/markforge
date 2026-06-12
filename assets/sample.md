@@ -61,3 +61,5 @@ def greet(name: str) -> str:
 ---
 
 Press **⌘O** to open your own Markdown file and start reading.
+
+<!-- diff/discard 테스트용 임시 줄 -->
