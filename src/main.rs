@@ -37,11 +37,14 @@ actions!(
         ToggleSidebar,
         ToggleTheme,
         ToggleSettings,
-        FontInc,
-        FontDec,
         ZoomIn,
         ZoomOut,
         ZoomReset,
+        TreeUp,
+        TreeDown,
+        TreeLeft,
+        TreeRight,
+        TreeConfirm,
         CloseWindow,
         Quit
     ]
@@ -114,6 +117,13 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-=", ZoomIn, None),
         KeyBinding::new("cmd--", ZoomOut, None),
         KeyBinding::new("cmd-0", ZoomReset, None),
+        // Sidebar tree navigation. The editor/search inputs bind arrows in
+        // their own (deeper) key context, so these only fire elsewhere.
+        KeyBinding::new("up", TreeUp, None),
+        KeyBinding::new("down", TreeDown, None),
+        KeyBinding::new("left", TreeLeft, None),
+        KeyBinding::new("right", TreeRight, None),
+        KeyBinding::new("enter", TreeConfirm, None),
         KeyBinding::new("cmd-w", CloseWindow, None),
         KeyBinding::new("cmd-q", Quit, None),
     ]);
@@ -184,6 +194,18 @@ pub fn set_menus(cx: &mut App) {
             items: vec![
                 MenuItem::action("Toggle Sidebar", ToggleSidebar),
                 MenuItem::action("Toggle Editor", ToggleEdit),
+                MenuItem::Submenu(Menu {
+                    name: "Syntax Theme".into(),
+                    items: std::iter::once(MenuItem::action(
+                        "Default",
+                        SetSyntaxTheme(String::new()),
+                    ))
+                    .chain(syntax_theme::PRESETS.iter().map(|&name| {
+                        MenuItem::action(name, SetSyntaxTheme(name.to_string()))
+                    }))
+                    .collect(),
+                    disabled: false,
+                }),
                 MenuItem::separator(),
                 MenuItem::action("Zoom In", ZoomIn),
                 MenuItem::action("Zoom Out", ZoomOut),

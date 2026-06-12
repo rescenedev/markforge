@@ -15,8 +15,8 @@ use std::time::{Duration, SystemTime};
 
 use gpui::prelude::*;
 use gpui::{
-    App, ExternalPaths, FocusHandle, Focusable, PathPromptOptions, PromptLevel, SharedString,
-    StyleRefinement, Subscription, Task, Window, WindowAppearance, div, px,
+    App, ExternalPaths, FocusHandle, Focusable, PathPromptOptions, PromptLevel, ScrollHandle,
+    SharedString, StyleRefinement, Subscription, Task, Window, WindowAppearance, div, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, Theme, ThemeMode, TitleBar,
@@ -34,11 +34,11 @@ use gpui_component::{
 use crate::file_tree::FileTree;
 use crate::import::{is_imported_doc, read_document};
 use crate::rem_scaled::RemScaled;
-use crate::settings::{FONT_SIZE_MAX, FONT_SIZE_MIN, Settings, ThemePref};
+use crate::settings::{Settings, ThemePref, parse_hex_color};
 use crate::{
-    CloseWindow, FontDec, FontInc, OpenFile, OpenFolder, OpenRecent, Quit, Reload, Save,
-    SetSyntaxTheme, SetTheme, ToggleEdit, ToggleSettings, ToggleSidebar, ToggleTheme, ZoomIn,
-    ZoomOut, ZoomReset,
+    CloseWindow, OpenFile, OpenFolder, OpenRecent, Quit, Reload, Save, SetSyntaxTheme, SetTheme,
+    ToggleEdit, ToggleSettings, ToggleSidebar, ToggleTheme, TreeConfirm, TreeDown, TreeLeft,
+    TreeRight, TreeUp, ZoomIn, ZoomOut, ZoomReset,
 };
 
 /// Bundled showcase document, displayed on first launch.
@@ -47,9 +47,6 @@ const SAMPLE: &str = include_str!("../assets/sample.md");
 const ZOOM_STEP: f32 = 0.1;
 const ZOOM_MIN: f32 = 0.6;
 const ZOOM_MAX: f32 = 2.6;
-
-/// Step (px) for the base font-size control in Settings.
-const FONT_STEP: f32 = 1.0;
 
 /// How long to wait after the last keystroke before re-parsing the preview.
 const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(120);
@@ -138,14 +135,12 @@ pub struct MarkForge {
     zoom: f32,
     /// File-explorer model (opened folder, expansion, listings).
     file_tree: FileTree,
+    /// Keyboard cursor in the file tree (the row arrow keys act on).
+    tree_cursor: Option<PathBuf>,
+    /// Scroll state of the tree, so the cursor can be kept in view.
+    tree_scroll: ScrollHandle,
     /// Whether the left sidebar (file explorer) is shown.
     sidebar_open: bool,
-    /// Whether the Settings panel is open.
-    show_settings: bool,
-    /// Text field for the editor (monospace) font family.
-    editor_font_input: gpui::Entity<InputState>,
-    /// Text field for the preview font family.
-    preview_font_input: gpui::Entity<InputState>,
     /// Debounce task that refreshes `preview_text`.
     preview_task: Option<Task<()>>,
     /// Background poller that live-reloads the current file.
@@ -170,35 +165,6 @@ impl MarkForge {
         });
 
         let input_sub = cx.subscribe(&input_state, Self::on_input_event);
-
-        // Font-family text fields for the Settings panel.
-        let editor_font_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Editor font (e.g. Menlo) — empty for default")
-                .default_value(settings.editor_font.clone())
-        });
-        let preview_font_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Preview font — empty for default")
-                .default_value(settings.preview_font.clone())
-        });
-
-        let editor_font_sub =
-            cx.subscribe(&editor_font_input, |_this, state, ev: &InputEvent, cx| {
-                if matches!(ev, InputEvent::Change) {
-                    cx.global_mut::<Settings>().editor_font = state.read(cx).value().to_string();
-                    save_settings(cx);
-                    cx.notify();
-                }
-            });
-        let preview_font_sub =
-            cx.subscribe(&preview_font_input, |_this, state, ev: &InputEvent, cx| {
-                if matches!(ev, InputEvent::Change) {
-                    cx.global_mut::<Settings>().preview_font = state.read(cx).value().to_string();
-                    save_settings(cx);
-                    cx.notify();
-                }
-            });
 
         // Apply the persisted theme preference (System resolves to the OS
         // appearance) and keep following the OS while in System mode.
@@ -239,15 +205,14 @@ impl MarkForge {
             imported: false,
             zoom: settings.zoom.clamp(ZOOM_MIN, ZOOM_MAX),
             file_tree: FileTree::new(),
+            tree_cursor: None,
+            tree_scroll: ScrollHandle::new(),
             sidebar_open: settings.sidebar_open,
-            show_settings: false,
-            editor_font_input,
-            preview_font_input,
             preview_task: None,
             watch_task: None,
             doc_cache: HashMap::new(),
             load_seq: 0,
-            _subscriptions: vec![input_sub, editor_font_sub, preview_font_sub, appearance_sub],
+            _subscriptions: vec![input_sub, appearance_sub],
         };
 
         match initial {
@@ -581,6 +546,10 @@ impl MarkForge {
                     if this.file_path.as_deref() == Some(path.as_path()) && !this.dirty {
                         this.set_editor_text(text, window, cx);
                         this.last_modified = Some(modified);
+                        // Editing the open settings file elsewhere applies live.
+                        if Settings::is_settings_path(&path) {
+                            this.apply_settings_from_disk(window, cx);
+                        }
                         cx.notify();
                     }
                 });
@@ -654,6 +623,7 @@ impl MarkForge {
     fn open_folder(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.file_tree.open(path.clone());
         self.sidebar_open = true;
+        self.tree_cursor = None;
         // New root: stale cache entries are useless now; preload the new dir.
         self.doc_cache.clear();
         self.preload_dir(path.clone(), cx);
@@ -746,6 +716,7 @@ impl MarkForge {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.tree_cursor = Some(path.clone());
         if is_dir {
             // Expanding a folder warms the cache for its documents.
             if self.file_tree.toggle(&path) {
@@ -757,6 +728,109 @@ impl MarkForge {
                 this.load_path(path, window, cx)
             });
         }
+    }
+
+    /// Whether arrow-key tree navigation should respond right now.
+    fn tree_nav_active(&self) -> bool {
+        self.sidebar_open && self.file_tree.is_open()
+    }
+
+    /// Index of the keyboard cursor in the visible rows.
+    fn tree_cursor_index(&self, rows: &[crate::file_tree::Row]) -> Option<usize> {
+        let cursor = self.tree_cursor.as_ref()?;
+        rows.iter().position(|r| &r.entry.path == cursor)
+    }
+
+    fn set_tree_cursor(&mut self, rows: &[crate::file_tree::Row], index: usize) {
+        if let Some(row) = rows.get(index) {
+            self.tree_cursor = Some(row.entry.path.clone());
+            self.tree_scroll.scroll_to_item(index);
+        }
+    }
+
+    fn on_tree_up(&mut self, _: &TreeUp, _window: &mut Window, cx: &mut Context<Self>) {
+        self.move_tree_cursor(-1, cx);
+    }
+
+    fn on_tree_down(&mut self, _: &TreeDown, _window: &mut Window, cx: &mut Context<Self>) {
+        self.move_tree_cursor(1, cx);
+    }
+
+    fn move_tree_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if !self.tree_nav_active() {
+            return;
+        }
+        let rows = self.file_tree.rows();
+        if rows.is_empty() {
+            return;
+        }
+        let last = rows.len() - 1;
+        let next = match self.tree_cursor_index(&rows) {
+            Some(i) => (i as isize + delta).clamp(0, last as isize) as usize,
+            // No cursor yet: start from the open file, else from an end.
+            None => self
+                .file_path
+                .as_ref()
+                .and_then(|p| rows.iter().position(|r| &r.entry.path == p))
+                .unwrap_or(if delta > 0 { 0 } else { last }),
+        };
+        self.set_tree_cursor(&rows, next);
+        cx.notify();
+    }
+
+    /// ← collapses an expanded folder, otherwise jumps to the parent row.
+    fn on_tree_left(&mut self, _: &TreeLeft, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.tree_nav_active() {
+            return;
+        }
+        let rows = self.file_tree.rows();
+        let Some(i) = self.tree_cursor_index(&rows) else {
+            self.move_tree_cursor(1, cx);
+            return;
+        };
+        let row = &rows[i];
+        if row.entry.is_dir && row.expanded {
+            self.file_tree.toggle(&row.entry.path);
+        } else if let Some(parent) = rows[..i].iter().rposition(|r| r.depth < row.depth) {
+            self.set_tree_cursor(&rows, parent);
+        }
+        cx.notify();
+    }
+
+    /// → expands a collapsed folder; on an expanded one, steps into it.
+    fn on_tree_right(&mut self, _: &TreeRight, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.tree_nav_active() {
+            return;
+        }
+        let rows = self.file_tree.rows();
+        let Some(i) = self.tree_cursor_index(&rows) else {
+            self.move_tree_cursor(1, cx);
+            return;
+        };
+        let row = &rows[i];
+        if row.entry.is_dir {
+            if !row.expanded {
+                if self.file_tree.toggle(&row.entry.path) {
+                    self.preload_dir(row.entry.path.clone(), cx);
+                }
+            } else if rows.get(i + 1).is_some_and(|r| r.depth == row.depth + 1) {
+                self.set_tree_cursor(&rows, i + 1);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Enter opens the file (or toggles the folder) under the cursor.
+    fn on_tree_confirm(&mut self, _: &TreeConfirm, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.tree_nav_active() {
+            return;
+        }
+        let rows = self.file_tree.rows();
+        let Some(i) = self.tree_cursor_index(&rows) else {
+            return;
+        };
+        let row = rows[i].clone();
+        self.on_tree_entry(row.entry.path, row.entry.is_dir, window, cx);
     }
 
     fn on_reload(&mut self, _: &Reload, window: &mut Window, cx: &mut Context<Self>) {
@@ -844,6 +918,9 @@ impl MarkForge {
             Ok(()) => {
                 self.last_modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
                 self.dirty = false;
+                if Settings::is_settings_path(&path) {
+                    self.apply_settings_from_disk(window, cx);
+                }
                 cx.notify();
                 true
             }
@@ -880,44 +957,38 @@ impl MarkForge {
         self.set_theme_pref(pref, window, cx);
     }
 
+    /// ⌘, — settings are a JSON document, and MarkForge is a JSON editor:
+    /// open `settings.json` in the split editor. Saving (or editing it in any
+    /// other app) applies the new settings immediately.
     fn on_toggle_settings(
         &mut self,
         _: &ToggleSettings,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.show_settings = !self.show_settings;
-        if self.show_settings {
-            // Sync the font fields to the persisted values when opening.
-            let settings = cx.global::<Settings>().clone();
-            self.editor_font_input.update(cx, |state, cx| {
-                state.set_value(settings.editor_font.clone(), window, cx)
-            });
-            self.preview_font_input.update(cx, |state, cx| {
-                state.set_value(settings.preview_font.clone(), window, cx)
-            });
-        } else {
-            self.focus_handle.focus(window, cx);
-        }
-        cx.notify();
-    }
-
-    fn on_font_inc(&mut self, _: &FontInc, _window: &mut Window, cx: &mut Context<Self>) {
-        self.adjust_font_size(FONT_STEP, cx);
-    }
-
-    fn on_font_dec(&mut self, _: &FontDec, _window: &mut Window, cx: &mut Context<Self>) {
-        self.adjust_font_size(-FONT_STEP, cx);
-    }
-
-    fn adjust_font_size(&mut self, delta: f32, cx: &mut Context<Self>) {
-        let current = cx.global::<Settings>().body_font_size;
-        let next = (current + delta).clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
-        if (next - current).abs() > f32::EPSILON {
-            cx.global_mut::<Settings>().body_font_size = next;
-            save_settings(cx);
+        // Persist current state first so the file shows current values.
+        save_settings(cx);
+        let Some(path) = Settings::path() else { return };
+        self.guard_unsaved(window, cx, move |this, window, cx| {
+            this.load_path(path, window, cx);
+            if !this.editing {
+                this.editing = true;
+                this.input_state.focus_handle(cx).focus(window, cx);
+            }
             cx.notify();
-        }
+        });
+    }
+
+    /// Re-read `settings.json` and apply everything it controls.
+    fn apply_settings_from_disk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let settings = Settings::load();
+        cx.set_global(settings.clone());
+        self.zoom = settings.zoom.clamp(ZOOM_MIN, ZOOM_MAX);
+        self.sidebar_open = settings.sidebar_open;
+        apply_theme(settings.theme, window, cx);
+        apply_syntax_theme(cx);
+        crate::set_menus(cx);
+        cx.notify();
     }
 
     fn set_theme_pref(&mut self, pref: ThemePref, window: &mut Window, cx: &mut Context<Self>) {
@@ -974,10 +1045,19 @@ impl MarkForge {
         let zoom = self.zoom;
         let body = settings.body_font_size.max(1.0) * zoom;
         let preview_font = settings.preview_font.clone();
+        let pad = px(settings.preview_padding.clamp(0.0, 64.0));
+        let is_code_doc = !matches!(self.doc_kind, DocKind::Markdown);
 
         // Scale fenced code blocks too (they otherwise use the fixed mono size).
         let mut code_block = StyleRefinement::default();
         code_block.text.font_size = Some((theme.mono_font_size * zoom).into());
+        // Code documents (JSON, …) are one big code block: render it
+        // edge-to-edge instead of as an inset rounded card.
+        let code_block = if is_code_doc {
+            code_block.rounded_none().p_4()
+        } else {
+            code_block
+        };
 
         let style = TextViewStyle {
             heading_base_font_size: px(body),
@@ -993,8 +1073,7 @@ impl MarkForge {
             .selectable(true)
             .size_full()
             .text_size(px(body))
-            .px_8()
-            .py_6()
+            .when(!is_code_doc, |this| this.p(pad))
             .when(!preview_font.is_empty(), |this| this.font_family(preview_font))
     }
 
@@ -1176,6 +1255,17 @@ impl MarkForge {
         let theme = cx.theme();
         let weak = cx.entity().downgrade();
 
+        // In dark mode the theme's sidebar color matches the document
+        // background (#1A1D29) — too dark to read as a separate pane. Lift it
+        // a step so the explorer separates from the content, VSCode-style.
+        // Overridable via "sidebar_bg_dark" in settings.json.
+        let sidebar_bg = if theme.mode.is_dark() {
+            parse_hex_color(&cx.global::<Settings>().sidebar_bg_dark)
+                .unwrap_or(gpui::hsla(0.633, 0.16, 0.175, 1.0))
+        } else {
+            theme.sidebar
+        };
+
         let header_title = self
             .file_tree
             .root()
@@ -1270,11 +1360,14 @@ impl MarkForge {
         } else {
             let rows = self.file_tree.rows();
             let current = self.file_path.clone();
+            let cursor = self.tree_cursor.clone();
             // macOS system accent blue (selectedContentBackgroundColor), white on top.
             let accent = gpui::hsla(0.586, 0.92, 0.52, 1.0);
             let on_accent = gpui::hsla(0., 0., 1., 1.);
             // A blue tint for hover — clearly visible, ties to the selection.
             let hover_bg = gpui::hsla(0.586, 0.92, 0.52, 0.24);
+            // The keyboard cursor: stronger than hover, weaker than selection.
+            let cursor_bg = gpui::hsla(0.586, 0.92, 0.52, 0.38);
             v_flex()
                 .id("tree-scroll")
                 .size_full()
@@ -1282,10 +1375,12 @@ impl MarkForge {
                 .py_1()
                 .px_1p5()
                 .overflow_y_scroll()
+                .track_scroll(&self.tree_scroll)
                 .children(rows.into_iter().map(move |row| {
                     let path = row.entry.path.clone();
                     let is_dir = row.entry.is_dir;
                     let selected = !is_dir && current.as_deref() == Some(path.as_path());
+                    let at_cursor = cursor.as_deref() == Some(path.as_path());
                     let id = SharedString::from(path.to_string_lossy().to_string());
 
                     let name_color = if selected { on_accent } else { theme.sidebar_foreground };
@@ -1336,6 +1431,7 @@ impl MarkForge {
                         .text_color(name_color)
                         .cursor_pointer()
                         .when(selected, |this| this.bg(accent).font_medium())
+                        .when(!selected && at_cursor, |this| this.bg(cursor_bg))
                         .when(!selected, |this| this.hover(|this| this.bg(hover_bg)))
                         .child(lead)
                         .child(type_icon)
@@ -1351,119 +1447,13 @@ impl MarkForge {
 
         v_flex()
             .size_full()
-            .bg(theme.sidebar)
+            .bg(sidebar_bg)
             .border_r_1()
             .border_color(theme.sidebar_border)
             .child(header)
             .child(body)
     }
 
-    /// Modal Settings panel (appearance, text size, fonts).
-    fn render_settings(&self, cx: &Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let settings = cx.global::<Settings>();
-        let pref = settings.theme;
-        let font_size = settings.body_font_size.round() as i32;
-        let syntax = settings.syntax_theme.clone();
-
-        div()
-            .id("settings-overlay")
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(gpui::hsla(0., 0., 0., 0.45))
-            .child(
-                v_flex()
-                    .w(px(440.))
-                    .gap_4()
-                    .p_5()
-                    .bg(theme.background)
-                    .border_1()
-                    .border_color(theme.border)
-                    .rounded(theme.radius)
-                    .shadow_lg()
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .justify_between()
-                            .items_center()
-                            .child(div().text_lg().font_semibold().child("Settings"))
-                            .child(
-                                Button::new("close-settings")
-                                    .icon(IconName::Close)
-                                    .ghost()
-                                    .small()
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(Box::new(ToggleSettings), cx)
-                                    }),
-                            ),
-                    )
-                    .child(settings_section(
-                        "Appearance",
-                        h_flex()
-                            .gap_2()
-                            .child(theme_pref_button("System", "system", pref == ThemePref::System))
-                            .child(theme_pref_button("Light", "light", pref == ThemePref::Light))
-                            .child(theme_pref_button("Dark", "dark", pref == ThemePref::Dark)),
-                    ))
-                    .child(settings_section(
-                        "Text size",
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(
-                                Button::new("font-dec")
-                                    .icon(IconName::Minus)
-                                    .outline()
-                                    .small()
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(Box::new(FontDec), cx)
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .w(px(64.))
-                                    .text_center()
-                                    .child(format!("{font_size} px")),
-                            )
-                            .child(
-                                Button::new("font-inc")
-                                    .icon(IconName::Plus)
-                                    .outline()
-                                    .small()
-                                    .on_click(|_, window, cx| {
-                                        window.dispatch_action(Box::new(FontInc), cx)
-                                    }),
-                            ),
-                    ))
-                    .child(settings_section(
-                        "Preview font",
-                        Input::new(&self.preview_font_input).small().w_full(),
-                    ))
-                    .child(settings_section(
-                        "Editor font",
-                        Input::new(&self.editor_font_input).small().w_full(),
-                    ))
-                    .child(settings_section(
-                        "Syntax theme (dark)",
-                        h_flex()
-                            .gap_2()
-                            .flex_wrap()
-                            .child(syntax_theme_button("Default", "", syntax.is_empty()))
-                            .children(crate::syntax_theme::PRESETS.iter().map(|&name| {
-                                syntax_theme_button(name, name, syntax == name)
-                            })),
-                    ))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("Zoom with ⌘+ / ⌘- · changes are saved automatically"),
-                    ),
-            )
-    }
 }
 
 impl Focusable for MarkForge {
@@ -1511,11 +1501,14 @@ impl Render for MarkForge {
             .on_action(cx.listener(Self::on_set_theme))
             .on_action(cx.listener(Self::on_set_syntax_theme))
             .on_action(cx.listener(Self::on_toggle_settings))
-            .on_action(cx.listener(Self::on_font_inc))
-            .on_action(cx.listener(Self::on_font_dec))
             .on_action(cx.listener(Self::on_zoom_in))
             .on_action(cx.listener(Self::on_zoom_out))
             .on_action(cx.listener(Self::on_zoom_reset))
+            .on_action(cx.listener(Self::on_tree_up))
+            .on_action(cx.listener(Self::on_tree_down))
+            .on_action(cx.listener(Self::on_tree_left))
+            .on_action(cx.listener(Self::on_tree_right))
+            .on_action(cx.listener(Self::on_tree_confirm))
             .on_action(cx.listener(Self::on_close_window))
             .on_action(cx.listener(Self::on_quit))
             .on_drop::<ExternalPaths>(move |paths, window, cx| {
@@ -1535,7 +1528,6 @@ impl Render for MarkForge {
             })
             .child(self.render_title_bar(cx))
             .child(div().id("body").flex_1().min_h(px(0.)).w_full().child(workspace))
-            .when(self.show_settings, |this| this.child(self.render_settings(cx)))
     }
 }
 
@@ -1656,45 +1648,6 @@ fn notify_save_error(path: &PathBuf, err: &std::io::Error, window: &mut Window, 
         ),
         cx,
     );
-}
-
-/// A labelled section for the Settings panel.
-fn settings_section(label: &'static str, content: impl IntoElement) -> impl IntoElement {
-    v_flex()
-        .w_full()
-        .gap_1()
-        .child(div().text_sm().font_semibold().child(label))
-        .child(content)
-}
-
-/// One of the Appearance choices; `value` is "system" | "light" | "dark".
-fn theme_pref_button(label: &'static str, value: &'static str, active: bool) -> Button {
-    let button = Button::new(value)
-        .label(label)
-        .small()
-        .on_click(move |_, window, cx| {
-            window.dispatch_action(Box::new(SetTheme(value.to_string())), cx)
-        });
-    if active {
-        button.primary()
-    } else {
-        button.outline()
-    }
-}
-
-/// A syntax-theme choice; `value` is the preset display name ("" = Default).
-fn syntax_theme_button(label: &'static str, value: &'static str, active: bool) -> Button {
-    let button = Button::new(SharedString::from(format!("syntax-{value}")))
-        .label(label)
-        .xsmall()
-        .on_click(move |_, window, cx| {
-            window.dispatch_action(Box::new(SetSyntaxTheme(value.to_string())), cx)
-        });
-    if active {
-        button.primary()
-    } else {
-        button.outline()
-    }
 }
 
 /// Pick the best path from a drop: a supported document if present, else the first.

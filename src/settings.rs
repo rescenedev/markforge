@@ -3,7 +3,7 @@
 //! Stored as JSON at `~/Library/Application Support/MarkForge/settings.json`.
 //! Installed as a GPUI global so any view can read/update it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +41,10 @@ pub struct Settings {
     pub syntax_theme: String,
     /// Whether the file-explorer sidebar is shown (default: open).
     pub sidebar_open: bool,
+    /// Inner padding (px) around the rendered preview. 0 = edge-to-edge.
+    pub preview_padding: f32,
+    /// Sidebar background in dark mode (hex, e.g. "#262B3C"); empty = default.
+    pub sidebar_bg_dark: String,
     pub recent: Vec<PathBuf>,
 }
 
@@ -54,6 +58,8 @@ impl Default for Settings {
             editor_font: String::new(),
             syntax_theme: String::new(),
             sidebar_open: true,
+            preview_padding: 8.0,
+            sidebar_bg_dark: String::new(),
             recent: Vec::new(),
         }
     }
@@ -63,12 +69,14 @@ impl gpui::Global for Settings {}
 
 impl Settings {
     /// Load settings from disk, falling back to defaults on any error.
-    /// Recent entries that no longer exist on disk are dropped.
+    /// Hand-edited values are clamped to sane ranges; recent entries that no
+    /// longer exist on disk are dropped.
     pub fn load() -> Self {
         let mut settings: Self = Self::path()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
+        settings.body_font_size = settings.body_font_size.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
         settings.recent.retain(|p| p.exists());
         settings
     }
@@ -96,7 +104,7 @@ impl Settings {
         self.recent.truncate(MAX_RECENT);
     }
 
-    fn path() -> Option<PathBuf> {
+    pub fn path() -> Option<PathBuf> {
         let home = std::env::var_os("HOME")?;
         Some(
             PathBuf::from(home)
@@ -104,4 +112,19 @@ impl Settings {
                 .join("settings.json"),
         )
     }
+
+    /// Whether `path` is the settings file (editing it in-app applies live).
+    pub fn is_settings_path(path: &Path) -> bool {
+        Self::path().as_deref() == Some(path)
+    }
+}
+
+/// Parse a `#RRGGBB` hex color.
+pub fn parse_hex_color(s: &str) -> Option<gpui::Hsla> {
+    let hex = s.trim().strip_prefix('#')?;
+    if hex.len() != 6 {
+        return None;
+    }
+    let v = u32::from_str_radix(hex, 16).ok()?;
+    Some(gpui::rgb(v).into())
 }

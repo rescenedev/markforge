@@ -66,6 +66,7 @@ cargo run --release -- path/to/notes.md
 | Zoom in / out / reset| ⌘+ / ⌘- / ⌘0 |
 | Reload               | ⌘R       |
 | Toggle light/dark    | ⌘⇧L      |
+| Navigate file tree   | ↑ ↓ (move) · ← → (collapse/expand) · ⏎ (open) |
 | Close window         | ⌘W       |
 | Quit                 | ⌘Q       |
 
@@ -73,7 +74,11 @@ You can also **drag a `.md` file onto the window** to open it (or drag a
 folder to open it in the sidebar). Closing, quitting, opening another file, or
 reloading with unsaved edits asks to save first.
 
-Settings are stored at `~/Library/Application Support/MarkForge/settings.json`.
+Settings live at `~/Library/Application Support/MarkForge/settings.json` —
+⌘, opens that file *in MarkForge itself*; save (⌘S) and the changes apply
+instantly. Keys include `theme`, `zoom`, `body_font_size`, `preview_font`,
+`editor_font`, `syntax_theme`, `sidebar_open`, `preview_padding`, and
+`sidebar_bg_dark`.
 
 ## Building
 
