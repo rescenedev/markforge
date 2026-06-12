@@ -451,8 +451,14 @@ impl MarkForge {
             if let Some(parent) = path.parent() {
                 self.file_tree.open(parent.to_path_buf());
                 self.preload_dir(parent.to_path_buf(), cx);
-                self.start_git_poll(parent.to_path_buf(), cx);
             }
+        }
+
+        // Git context follows the open document: in a multi-repo workspace
+        // the branch chip / badges / commit panel reflect the repository the
+        // current file lives in (repo_status falls back to "not a repo").
+        if let Some(parent) = path.parent() {
+            self.start_git_poll(parent.to_path_buf(), cx);
         }
 
         cx.global_mut::<Settings>().push_recent(path);
@@ -1859,9 +1865,18 @@ impl MarkForge {
                 .into_any_element()
         };
 
-        // Commit panel: only when the open folder is a git repository.
-        let commit_panel = self.git.root.is_some().then(|| {
+        // Commit panel: only when the current git context is a repository.
+        let commit_panel = self.git.root.clone().map(|repo_root| {
             let changes = self.git.files.len();
+            // In a multi-repo workspace, say which repo this panel acts on.
+            let repo_name = (Some(repo_root.as_path()) != self.file_tree.root())
+                .then(|| repo_root.file_name().map(|n| n.to_string_lossy().to_string()))
+                .flatten();
+            let count_label = match changes {
+                0 => "No changes".to_string(),
+                1 => "1 change".to_string(),
+                n => format!("{n} changes"),
+            };
             v_flex()
                 .flex_none()
                 .w_full()
@@ -1874,13 +1889,16 @@ impl MarkForge {
                         .w_full()
                         .items_center()
                         .justify_between()
-                        .child(div().text_xs().text_color(theme.muted_foreground).child(
-                            match changes {
-                                0 => "No changes".to_string(),
-                                1 => "1 change".to_string(),
-                                n => format!("{n} changes"),
-                            },
-                        ))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .truncate()
+                                .child(match repo_name {
+                                    Some(name) => format!("{name} · {count_label}"),
+                                    None => count_label,
+                                }),
+                        )
                         .child(
                             h_flex()
                                 .gap_0p5()
