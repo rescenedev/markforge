@@ -14,15 +14,17 @@ use std::time::{Duration, SystemTime};
 
 use gpui::prelude::*;
 use gpui::{
-    App, ExternalPaths, FocusHandle, Focusable, PathPromptOptions, SharedString, StyleRefinement,
-    Subscription, Task, Window, WindowAppearance, div, px,
+    App, ExternalPaths, FocusHandle, Focusable, PathPromptOptions, PromptLevel, SharedString,
+    StyleRefinement, Subscription, Task, Window, WindowAppearance, div, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, Theme, ThemeMode, TitleBar,
+    WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     highlighter::Language,
     input::{Input, InputEvent, InputState},
+    notification::NotificationType,
     resizable::{h_resizable, resizable_panel},
     text::{TextViewStyle, markdown},
     v_flex,
@@ -32,8 +34,9 @@ use crate::file_tree::FileTree;
 use crate::rem_scaled::RemScaled;
 use crate::settings::{FONT_SIZE_MAX, FONT_SIZE_MIN, Settings, ThemePref};
 use crate::{
-    FontDec, FontInc, OpenFile, OpenFolder, OpenRecent, Reload, Save, SetSyntaxTheme, SetTheme,
-    ToggleEdit, ToggleSettings, ToggleSidebar, ToggleTheme, ZoomIn, ZoomOut, ZoomReset,
+    CloseWindow, FontDec, FontInc, OpenFile, OpenFolder, OpenRecent, Quit, Reload, Save,
+    SetSyntaxTheme, SetTheme, ToggleEdit, ToggleSettings, ToggleSidebar, ToggleTheme, ZoomIn,
+    ZoomOut, ZoomReset,
 };
 
 /// Bundled showcase document, displayed on first launch.
@@ -49,9 +52,10 @@ const FONT_STEP: f32 = 1.0;
 /// How long to wait after the last keystroke before re-parsing the preview.
 const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(120);
 
-/// Outcome of a single file-watch poll.
+/// Decision from a single file-watch poll.
 enum WatchOutcome {
-    Reloaded,
+    /// The file changed on disk and a reload should proceed.
+    Reload,
     Noop,
     Stop,
 }
@@ -141,6 +145,22 @@ impl MarkForge {
                 apply_theme(ThemePref::System, window, cx);
                 apply_syntax_theme(cx);
             }
+        });
+
+        // Intercept the red traffic-light close so unsaved edits get a prompt.
+        // Returning `false` keeps the window; the guard re-closes it on confirm.
+        let weak = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            let Some(entity) = weak.upgrade() else {
+                return true;
+            };
+            if !entity.read(cx).dirty {
+                return true;
+            }
+            entity.update(cx, |this, cx| {
+                this.guard_unsaved(window, cx, |_, window, _| window.remove_window());
+            });
+            false
         });
 
         let mut this = Self {
@@ -240,6 +260,10 @@ impl MarkForge {
                     window,
                     cx,
                 );
+                // Drop unreadable entries from Open Recent so they don't linger.
+                cx.global_mut::<Settings>().recent.retain(|p| p != &path);
+                save_settings(cx);
+                crate::set_menus(cx);
                 self.file_path = Some(path);
                 self.last_modified = None;
                 self.dirty = false;
@@ -251,6 +275,8 @@ impl MarkForge {
 
     /// Spawn a background task that re-reads `path` whenever its mtime changes —
     /// but only while the user isn't actively editing unsaved changes.
+    /// Stat and read both run on the background executor so a large file never
+    /// stalls the UI thread.
     fn start_watch(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let task = cx.spawn_in(window, async move |this, cx| {
             loop {
@@ -258,39 +284,55 @@ impl MarkForge {
                     .timer(Duration::from_millis(700))
                     .await;
 
-                let Ok(modified) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
-                    continue;
+                let modified = {
+                    let path = path.clone();
+                    cx.background_executor()
+                        .spawn(async move {
+                            std::fs::metadata(&path).and_then(|m| m.modified()).ok()
+                        })
+                        .await
                 };
+                let Some(modified) = modified else { continue };
 
-                let outcome = this.update_in(cx, |this, window, cx| {
+                // Cheap main-thread check: decide whether a reload is needed.
+                let outcome = this.update(cx, |this, _| {
                     if this.file_path.as_deref() != Some(path.as_path()) {
-                        return WatchOutcome::Stop;
-                    }
-                    if this.last_modified == Some(modified) {
-                        return WatchOutcome::Noop;
-                    }
-                    // Don't clobber in-progress edits; just remember the new mtime.
-                    if this.dirty {
+                        WatchOutcome::Stop
+                    } else if this.last_modified == Some(modified) {
+                        WatchOutcome::Noop
+                    } else if this.dirty {
+                        // Don't clobber in-progress edits; just remember the new mtime.
                         this.last_modified = Some(modified);
-                        return WatchOutcome::Noop;
-                    }
-                    match std::fs::read_to_string(&path) {
-                        Ok(text) => {
-                            this.set_editor_text(text, window, cx);
-                            this.last_modified = Some(modified);
-                            this.dirty = false;
-                            WatchOutcome::Reloaded
-                        }
-                        Err(_) => WatchOutcome::Noop,
+                        WatchOutcome::Noop
+                    } else {
+                        WatchOutcome::Reload
                     }
                 });
-
                 match outcome {
-                    Ok(WatchOutcome::Reloaded) => {
-                        let _ = this.update(cx, |_, cx| cx.notify());
-                    }
-                    Ok(WatchOutcome::Noop) => {}
+                    Ok(WatchOutcome::Reload) => {}
+                    Ok(WatchOutcome::Noop) => continue,
                     Ok(WatchOutcome::Stop) | Err(_) => break,
+                }
+
+                let text = {
+                    let path = path.clone();
+                    cx.background_executor()
+                        .spawn(async move { std::fs::read_to_string(&path) })
+                        .await
+                };
+                let Ok(text) = text else { continue };
+
+                // Re-check before applying: the user may have started editing
+                // or switched files while the read was in flight.
+                let applied = this.update_in(cx, |this, window, cx| {
+                    if this.file_path.as_deref() == Some(path.as_path()) && !this.dirty {
+                        this.set_editor_text(text, window, cx);
+                        this.last_modified = Some(modified);
+                        cx.notify();
+                    }
+                });
+                if applied.is_err() {
+                    break;
                 }
             }
         });
@@ -298,8 +340,68 @@ impl MarkForge {
         self.watch_task = Some(task);
     }
 
+    /// Run `then` immediately when the buffer is clean; otherwise show the
+    /// standard macOS Save / Don't Save / Cancel sheet first. `then` only runs
+    /// if the document was saved successfully or the user chose to discard.
+    fn guard_unsaved(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        if !self.dirty {
+            then(self, window, cx);
+            return;
+        }
+
+        // "Save" needs a destination; an untitled buffer only gets Discard/Cancel.
+        let can_save = self.file_path.is_some();
+        let answers: &[&str] = if can_save {
+            &["Save", "Don't Save", "Cancel"]
+        } else {
+            &["Discard Changes", "Cancel"]
+        };
+        let name = self
+            .file_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "this document".to_string());
+
+        let rx = window.prompt(
+            PromptLevel::Warning,
+            &format!("Do you want to save the changes made to {name}?"),
+            Some("Your changes will be lost if you don't save them."),
+            answers,
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(answer) = rx.await else { return };
+            let _ = this.update_in(cx, |this, window, cx| {
+                let proceed = if can_save {
+                    match answer {
+                        0 => this.save_in_place(window, cx),
+                        1 => true,
+                        _ => false,
+                    }
+                } else {
+                    answer == 0
+                };
+                if proceed {
+                    this.dirty = false;
+                    then(this, window, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
     fn on_open(&mut self, _: &OpenFile, window: &mut Window, cx: &mut Context<Self>) {
-        // Allow picking either a Markdown file or a folder.
+        self.guard_unsaved(window, cx, |this, window, cx| this.prompt_open(window, cx));
+    }
+
+    /// Show the native picker for a Markdown file or a folder.
+    fn prompt_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: true,
@@ -328,7 +430,10 @@ impl MarkForge {
         if action.0.is_empty() {
             return; // the "No Recent Files" placeholder
         }
-        self.load_path(PathBuf::from(action.0.clone()), window, cx);
+        let path = PathBuf::from(action.0.clone());
+        self.guard_unsaved(window, cx, move |this, window, cx| {
+            this.load_path(path, window, cx)
+        });
     }
 
     fn on_open_folder(&mut self, _: &OpenFolder, window: &mut Window, cx: &mut Context<Self>) {
@@ -378,14 +483,20 @@ impl MarkForge {
             self.file_tree.toggle(&path);
             cx.notify();
         } else {
-            self.load_path(path, window, cx);
+            self.guard_unsaved(window, cx, move |this, window, cx| {
+                this.load_path(path, window, cx)
+            });
         }
     }
 
     fn on_reload(&mut self, _: &Reload, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(path) = self.file_path.clone() {
-            self.last_modified = None; // force a re-read
-            self.load_path(path, window, cx);
+        if self.file_path.is_some() {
+            self.guard_unsaved(window, cx, |this, window, cx| {
+                if let Some(path) = this.file_path.clone() {
+                    this.last_modified = None; // force a re-read
+                    this.load_path(path, window, cx);
+                }
+            });
         }
     }
 
@@ -400,14 +511,8 @@ impl MarkForge {
     }
 
     fn on_save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.text(cx).to_string();
-
-        if let Some(path) = self.file_path.clone() {
-            if std::fs::write(&path, &text).is_ok() {
-                self.last_modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-                self.dirty = false;
-                cx.notify();
-            }
+        if self.file_path.is_some() {
+            self.save_in_place(window, cx);
             return;
         }
 
@@ -418,21 +523,54 @@ impl MarkForge {
             let path = rx.await.ok()?.ok()??;
             this.update_in(cx, |this, window, cx| {
                 let text = this.text(cx).to_string();
-                if std::fs::write(&path, &text).is_ok() {
-                    this.last_modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-                    this.file_path = Some(path.clone());
-                    this.dirty = false;
-                    this.start_watch(path.clone(), window, cx);
-                    cx.global_mut::<Settings>().push_recent(path);
-                    save_settings(cx);
-                    crate::set_menus(cx);
-                    cx.notify();
+                match std::fs::write(&path, &text) {
+                    Ok(()) => {
+                        this.last_modified =
+                            std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                        this.file_path = Some(path.clone());
+                        this.dirty = false;
+                        this.start_watch(path.clone(), window, cx);
+                        cx.global_mut::<Settings>().push_recent(path);
+                        save_settings(cx);
+                        crate::set_menus(cx);
+                        cx.notify();
+                    }
+                    Err(err) => notify_save_error(&path, &err, window, cx),
                 }
             })
             .ok()?;
             Some(())
         })
         .detach();
+    }
+
+    /// Write the buffer to its backing file. Reports failure via a notification
+    /// and returns whether the write succeeded.
+    fn save_in_place(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(path) = self.file_path.clone() else {
+            return false;
+        };
+        let text = self.text(cx).to_string();
+        match std::fs::write(&path, &text) {
+            Ok(()) => {
+                self.last_modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                self.dirty = false;
+                cx.notify();
+                true
+            }
+            Err(err) => {
+                notify_save_error(&path, &err, window, cx);
+                false
+            }
+        }
+    }
+
+    fn on_close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
+        self.guard_unsaved(window, cx, |_, window, _| window.remove_window());
+    }
+
+    fn on_quit(&mut self, _: &Quit, window: &mut Window, cx: &mut Context<Self>) {
+        self.guard_unsaved(window, cx, |_, _, cx| cx.quit());
     }
 
     fn on_toggle_theme(&mut self, _: &ToggleTheme, window: &mut Window, cx: &mut Context<Self>) {
@@ -1089,10 +1227,24 @@ impl Render for MarkForge {
             .on_action(cx.listener(Self::on_zoom_in))
             .on_action(cx.listener(Self::on_zoom_out))
             .on_action(cx.listener(Self::on_zoom_reset))
+            .on_action(cx.listener(Self::on_close_window))
+            .on_action(cx.listener(Self::on_quit))
             .on_drop::<ExternalPaths>(move |paths, window, cx| {
-                if let Some(path) = first_markdown(paths.paths()) {
-                    let _ = weak.update(cx, |this, cx| this.load_path(path, window, cx));
-                }
+                let Some(path) = first_markdown(paths.paths()) else {
+                    return;
+                };
+                let _ = weak.update(cx, |this, cx| {
+                    // A dropped folder opens in the sidebar instead of erroring.
+                    if path.is_dir() {
+                        this.file_tree.open(path.clone());
+                        this.sidebar_open = true;
+                        cx.notify();
+                    } else {
+                        this.guard_unsaved(window, cx, move |this, window, cx| {
+                            this.load_path(path, window, cx)
+                        });
+                    }
+                });
             })
             .child(self.render_title_bar(cx))
             .child(div().id("body").flex_1().min_h(px(0.)).w_full().child(workspace))
@@ -1139,6 +1291,17 @@ fn save_settings(cx: &App) {
     if let Some(settings) = cx.try_global::<Settings>() {
         settings.save();
     }
+}
+
+/// Surface a failed write as an in-window error notification.
+fn notify_save_error(path: &PathBuf, err: &std::io::Error, window: &mut Window, cx: &mut App) {
+    window.push_notification(
+        (
+            NotificationType::Error,
+            format!("Couldn't save {}: {err}", path.display()),
+        ),
+        cx,
+    );
 }
 
 /// A labelled section for the Settings panel.

@@ -60,11 +60,14 @@ impl gpui::Global for Settings {}
 
 impl Settings {
     /// Load settings from disk, falling back to defaults on any error.
+    /// Recent entries that no longer exist on disk are dropped.
     pub fn load() -> Self {
-        Self::path()
+        let mut settings: Self = Self::path()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        settings.recent.retain(|p| p.exists());
+        settings
     }
 
     /// Persist to disk. Errors are logged but never propagated — settings are

@@ -59,18 +59,26 @@ impl FileTree {
         }
     }
 
-    /// Re-read every cached directory from disk (manual refresh).
+    /// Re-read the root and expanded directories from disk (manual refresh).
+    /// Listings cached for collapsed directories are dropped, so the cache
+    /// can't grow without bound across a long session.
     pub fn refresh(&mut self) {
-        let dirs: Vec<PathBuf> = self.cache.keys().cloned().collect();
         self.cache.clear();
+        if let Some(root) = self.root.clone() {
+            self.ensure(&root);
+        }
+        let dirs: Vec<PathBuf> = self.expanded.iter().cloned().collect();
         for d in dirs {
             self.ensure(&d);
         }
     }
 
-    /// Collapse all expanded folders.
+    /// Collapse all expanded folders and drop their cached listings.
     pub fn collapse_all(&mut self) {
         self.expanded.clear();
+        let root = self.root.clone();
+        self.cache
+            .retain(|dir, _| Some(dir.as_path()) == root.as_deref());
     }
 
     fn ensure(&mut self, dir: &Path) {
@@ -106,16 +114,20 @@ impl FileTree {
     }
 }
 
-/// Read a directory, directories first, then case-insensitive by name.
+/// Read a directory, hiding dotfiles, directories first, then
+/// case-insensitive by name.
 fn read_dir_sorted(dir: &Path) -> Vec<FsEntry> {
     let mut entries: Vec<FsEntry> = match std::fs::read_dir(dir) {
         Ok(rd) => rd
             .flatten()
-            .map(|e| {
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    return None; // .git, .DS_Store, …
+                }
                 let path = e.path();
                 let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                let name = e.file_name().to_string_lossy().to_string();
-                FsEntry { path, name, is_dir }
+                Some(FsEntry { path, name, is_dir })
             })
             .collect(),
         Err(_) => Vec::new(),

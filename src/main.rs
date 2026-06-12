@@ -41,6 +41,7 @@ actions!(
         ZoomIn,
         ZoomOut,
         ZoomReset,
+        CloseWindow,
         Quit
     ]
 );
@@ -75,6 +76,15 @@ fn main() {
         set_menus(cx);
         cx.activate(true);
 
+        // Single-window app: once the last window is gone there is no way to
+        // open a new one, so quit instead of lingering in the Dock.
+        cx.on_window_closed(|cx, _| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
+
         // Allow `markforge path/to/file.md` to open a document on launch.
         let initial_path = std::env::args().nth(1).map(PathBuf::from);
         open_main_window(initial_path, cx);
@@ -103,6 +113,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-=", ZoomIn, None),
         KeyBinding::new("cmd--", ZoomOut, None),
         KeyBinding::new("cmd-0", ZoomReset, None),
+        KeyBinding::new("cmd-w", CloseWindow, None),
         KeyBinding::new("cmd-q", Quit, None),
     ]);
 }
@@ -162,6 +173,8 @@ pub fn set_menus(cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Save", Save),
                 MenuItem::action("Reload", Reload),
+                MenuItem::separator(),
+                MenuItem::action("Close Window", CloseWindow),
             ],
             disabled: false,
         },

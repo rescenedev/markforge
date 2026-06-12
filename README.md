@@ -60,9 +60,12 @@ cargo run --release -- path/to/notes.md
 | Zoom in / out / reset| ⌘+ / ⌘- / ⌘0 |
 | Reload               | ⌘R       |
 | Toggle light/dark    | ⌘⇧L      |
+| Close window         | ⌘W       |
 | Quit                 | ⌘Q       |
 
-You can also **drag a `.md` file onto the window** to open it.
+You can also **drag a `.md` file onto the window** to open it (or drag a
+folder to open it in the sidebar). Closing, quitting, opening another file, or
+reloading with unsaved edits asks to save first.
 
 Settings are stored at `~/Library/Application Support/MarkForge/settings.json`.
 
