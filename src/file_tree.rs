@@ -7,6 +7,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::import::is_supported_doc;
+
 /// A single filesystem entry (file or directory).
 #[derive(Clone)]
 pub struct FsEntry {
@@ -118,8 +120,8 @@ impl FileTree {
     }
 }
 
-/// Read a directory, hiding dotfiles, directories first, then
-/// case-insensitive by name.
+/// Read a directory, hiding dotfiles and files MarkForge can't open,
+/// directories first, then case-insensitive by name.
 fn read_dir_sorted(dir: &Path) -> Vec<FsEntry> {
     let mut entries: Vec<FsEntry> = match std::fs::read_dir(dir) {
         Ok(rd) => rd
@@ -131,6 +133,9 @@ fn read_dir_sorted(dir: &Path) -> Vec<FsEntry> {
                 }
                 let path = e.path();
                 let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                if !is_dir && !is_supported_doc(&path) {
+                    return None; // binaries etc. would only open as an error
+                }
                 Some(FsEntry { path, name, is_dir })
             })
             .collect(),

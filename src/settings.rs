@@ -43,6 +43,9 @@ pub struct Settings {
     pub sidebar_open: bool,
     /// Inner padding (px) around the rendered preview. 0 = edge-to-edge.
     pub preview_padding: f32,
+    /// Opacity of the window backdrop gradient (0.2 transparent – 1.0 solid).
+    /// Sidebar and title bar derive slightly more transparent values from it.
+    pub backdrop_opacity: f32,
     /// Sidebar background in dark mode (hex, e.g. "#262B3C"); empty = default.
     pub sidebar_bg_dark: String,
     pub recent: Vec<PathBuf>,
@@ -59,6 +62,7 @@ impl Default for Settings {
             syntax_theme: String::new(),
             sidebar_open: true,
             preview_padding: 8.0,
+            backdrop_opacity: 0.68,
             sidebar_bg_dark: String::new(),
             recent: Vec::new(),
         }
@@ -77,6 +81,7 @@ impl Settings {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
         settings.body_font_size = settings.body_font_size.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
+        settings.backdrop_opacity = settings.backdrop_opacity.clamp(0.2, 1.0);
         settings.recent.retain(|p| p.exists());
         settings
     }

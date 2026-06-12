@@ -32,7 +32,7 @@ use gpui_component::{
 };
 
 use crate::file_tree::FileTree;
-use crate::import::{is_imported_doc, read_document};
+use crate::import::{is_imported_doc, is_supported_doc, read_document};
 use crate::rem_scaled::RemScaled;
 use crate::settings::{Settings, ThemePref, parse_hex_color};
 use crate::{
@@ -77,30 +77,49 @@ struct CachedDoc {
 /// What kind of document the buffer holds, driving highlighter and preview.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DocKind {
+    /// Rendered as Markdown (also: txt and converted docx/hwpx/pdf).
     Markdown,
-    /// `highlight` is false for very large documents (see [`HIGHLIGHT_MAX_BYTES`]).
-    Json { highlight: bool },
+    /// A code document: highlighted in the editor and shown as a fenced code
+    /// view in the preview. `highlight` turns off for very large documents
+    /// (see [`HIGHLIGHT_MAX_BYTES`]).
+    Code {
+        lang: &'static str,
+        highlight: bool,
+    },
 }
 
 impl DocKind {
     fn editor_language(self) -> &'static str {
         match self {
             Self::Markdown => "markdown",
-            Self::Json { highlight: true } => "json",
-            Self::Json { highlight: false } => "text",
+            Self::Code { lang, highlight: true } => lang,
+            Self::Code { highlight: false, .. } => "text",
         }
     }
 
     fn for_path(path: &std::path::Path) -> Self {
-        match path
+        let ext = path
             .extension()
             .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("json" | "jsonc") => Self::Json { highlight: true },
-            _ => Self::Markdown,
-        }
+            .map(|e| e.to_ascii_lowercase());
+        // Names must match the gpui-component highlighter registry (and the
+        // tree-sitter feature set enabled in Cargo.toml).
+        let lang = match ext.as_deref() {
+            Some("json" | "jsonc") => "json",
+            Some("py") => "python",
+            Some("rs") => "rust",
+            Some("js" | "mjs" | "cjs" | "jsx") => "javascript",
+            Some("ts") => "typescript",
+            Some("tsx") => "tsx",
+            Some("sh" | "bash" | "zsh") => "bash",
+            Some("go") => "go",
+            Some("html" | "htm") => "html",
+            Some("css") => "css",
+            Some("yaml" | "yml") => "yaml",
+            Some("toml") => "toml",
+            _ => return Self::Markdown,
+        };
+        Self::Code { lang, highlight: true }
     }
 }
 
@@ -276,33 +295,35 @@ impl MarkForge {
         cx: &mut Context<Self>,
     ) {
         let mut text = text.into();
-        if matches!(self.doc_kind, DocKind::Json { .. }) {
-            if let Some(pretty) = prettify_minified_json(&text) {
-                text = pretty.into();
+        if let DocKind::Code { lang, .. } = self.doc_kind {
+            if lang == "json" {
+                if let Some(pretty) = prettify_minified_json(&text) {
+                    text = pretty.into();
+                }
             }
-            // Re-decide editor highlighting on the final (pretty-printed) size.
+            // Re-decide editor highlighting on the final document size.
             let highlight = text.len() <= HIGHLIGHT_MAX_BYTES;
-            self.set_doc_kind(DocKind::Json { highlight }, cx);
+            self.set_doc_kind(DocKind::Code { lang, highlight }, cx);
         }
         self.input_state
             .update(cx, |state, cx| state.set_value(text.clone(), window, cx));
         self.preview_text = self.wrap_preview(text);
     }
 
-    /// Markdown renders as-is; JSON is wrapped in a fenced code block so the
-    /// preview shows a highlighted code view. Documents larger than
-    /// [`PREVIEW_MAX_BYTES`] are truncated in the preview (the editor has the
-    /// full text) so opening huge files stays fast.
+    /// Markdown renders as-is; code documents are wrapped in a fenced code
+    /// block so the preview shows a highlighted code view. Documents larger
+    /// than [`PREVIEW_MAX_BYTES`] are truncated in the preview (the editor
+    /// has the full text) so opening huge files stays fast.
     fn wrap_preview(&self, text: SharedString) -> SharedString {
         match self.doc_kind {
             DocKind::Markdown => text,
-            DocKind::Json { .. } => {
+            DocKind::Code { lang, .. } => {
                 let cut = preview_cut(&text, PREVIEW_MAX_BYTES);
                 // Four backticks so content containing ``` can't break the fence.
                 if cut < text.len() {
                     let total_kb = text.len() / 1024;
                     format!(
-                        "````json\n{}\n…\n````\n\n> ⚠️ **Preview truncated** — \
+                        "````{lang}\n{}\n…\n````\n\n> ⚠️ **Preview truncated** — \
                          showing the first {} KB of {} KB. \
                          Open the editor (⌘E) for the full document.",
                         &text[..cut],
@@ -311,7 +332,7 @@ impl MarkForge {
                     )
                     .into()
                 } else {
-                    format!("````json\n{text}\n````").into()
+                    format!("````{lang}\n{text}\n````").into()
                 }
             }
         }
@@ -1052,9 +1073,10 @@ impl MarkForge {
         let mut code_block = StyleRefinement::default();
         code_block.text.font_size = Some((theme.mono_font_size * zoom).into());
         // Code documents (JSON, …) are one big code block: render it
-        // edge-to-edge instead of as an inset rounded card.
+        // edge-to-edge instead of as an inset rounded card, translucent so the
+        // gradient backdrop tints it.
         let code_block = if is_code_doc {
-            code_block.rounded_none().p_4()
+            code_block.rounded_none().p_4().bg(theme.muted.alpha(0.2))
         } else {
             code_block
         };
@@ -1184,13 +1206,10 @@ impl MarkForge {
         )
     }
 
-    /// Full-width rendered Markdown.
+    /// Full-width rendered Markdown. No background of its own — the root
+    /// view's gradient backdrop shows through.
     fn render_preview(&self, cx: &Context<Self>) -> impl IntoElement {
-        div()
-            .id("doc")
-            .size_full()
-            .bg(cx.theme().background)
-            .child(self.styled_markdown(cx))
+        div().id("doc").size_full().child(self.styled_markdown(cx))
     }
 
     /// Split view: live preview on the left, source editor on the right.
@@ -1239,11 +1258,7 @@ impl MarkForge {
             h_resizable("split")
                 .child(
                     resizable_panel().child(
-                        div()
-                            .id("preview")
-                            .size_full()
-                            .bg(theme.background)
-                            .child(self.styled_markdown(cx)),
+                        div().id("preview").size_full().child(self.styled_markdown(cx)),
                     ),
                 )
                 .child(resizable_panel().child(editor)),
@@ -1259,11 +1274,17 @@ impl MarkForge {
         // background (#1A1D29) — too dark to read as a separate pane. Lift it
         // a step so the explorer separates from the content, VSCode-style.
         // Overridable via "sidebar_bg_dark" in settings.json.
+        // Darker teal than the content area (like the reference look), and
+        // more translucent than the backdrop so the blur breathes through,
+        // Finder-style.
+        let settings = cx.global::<Settings>();
+        let sidebar_alpha = (settings.backdrop_opacity - 0.18).clamp(0.2, 1.0);
         let sidebar_bg = if theme.mode.is_dark() {
-            parse_hex_color(&cx.global::<Settings>().sidebar_bg_dark)
-                .unwrap_or(gpui::hsla(0.633, 0.16, 0.175, 1.0))
+            parse_hex_color(&settings.sidebar_bg_dark)
+                .unwrap_or(gpui::hsla(0.55, 0.42, 0.075, 1.0))
+                .alpha(sidebar_alpha)
         } else {
-            theme.sidebar
+            theme.sidebar.alpha(sidebar_alpha)
         };
 
         let header_title = self
@@ -1465,6 +1486,26 @@ impl Focusable for MarkForge {
 impl Render for MarkForge {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let weak = cx.entity().downgrade();
+
+        // Deep-teal tonal gradient (dark) — a soft glow toward the top-left
+        // fading into a near-black petrol tone — translucent so the window's
+        // background blur shows through. Opacity comes from settings.
+        let o = cx.global::<Settings>().backdrop_opacity.clamp(0.2, 1.0);
+        let o_bottom = (o + 0.08).min(1.0);
+        let backdrop = if cx.theme().mode.is_dark() {
+            gpui::linear_gradient(
+                135.,
+                gpui::linear_color_stop(gpui::hsla(0.545, 0.46, 0.145, o), 0.),
+                gpui::linear_color_stop(gpui::hsla(0.565, 0.48, 0.065, o_bottom), 1.),
+            )
+        } else {
+            gpui::linear_gradient(
+                135.,
+                gpui::linear_color_stop(gpui::hsla(0.55, 0.70, 0.975, o), 0.),
+                gpui::linear_color_stop(gpui::hsla(0.58, 0.35, 0.945, o_bottom), 1.),
+            )
+        };
+
         let main_body = if self.editing {
             self.render_split(cx).into_any_element()
         } else {
@@ -1489,6 +1530,7 @@ impl Render for MarkForge {
         v_flex()
             .size_full()
             .relative()
+            .bg(backdrop)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_open))
             .on_action(cx.listener(Self::on_open_folder))
@@ -1545,6 +1587,14 @@ fn apply_theme(pref: ThemePref, window: &mut Window, cx: &mut App) {
         }
     };
     Theme::change(mode, Some(window), cx);
+    // Vibrancy: the title bar paints itself with `theme.title_bar`; make it
+    // translucent so the window blur reaches it too.
+    let opacity = cx
+        .try_global::<Settings>()
+        .map(|s| s.backdrop_opacity)
+        .unwrap_or(0.68);
+    let theme = Theme::global_mut(cx);
+    theme.title_bar = theme.title_bar.alpha((opacity - 0.13).clamp(0.2, 1.0));
 }
 
 /// Set the global highlight theme: the chosen syntax preset if any, otherwise
@@ -1580,32 +1630,10 @@ fn save_settings(cx: &App) {
     }
 }
 
-/// Document extensions MarkForge knows how to display.
-fn is_supported_doc(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| {
-            matches!(
-                e.to_ascii_lowercase().as_str(),
-                "md" | "markdown"
-                    | "mdown"
-                    | "mkd"
-                    | "text"
-                    | "txt"
-                    | "json"
-                    | "jsonc"
-                    | "docx"
-                    | "hwpx"
-                    | "pdf"
-            )
-        })
-        .unwrap_or(false)
-}
-
 /// Make raw file text ready for the buffer: minified JSON gets pretty-printed,
 /// everything else passes through. Safe to run on the background executor.
 fn prepare_doc_text(path: &Path, text: String) -> String {
-    if matches!(DocKind::for_path(path), DocKind::Json { .. }) {
+    if matches!(DocKind::for_path(path), DocKind::Code { lang: "json", .. }) {
         prettify_minified_json(&text).unwrap_or(text)
     } else {
         text

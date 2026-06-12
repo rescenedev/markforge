@@ -21,6 +21,25 @@ pub fn is_imported_doc(path: &Path) -> bool {
     )
 }
 
+/// Document extensions MarkForge knows how to display: Markdown and plain
+/// text, code files (highlighted), and convertible containers.
+pub fn is_supported_doc(path: &Path) -> bool {
+    matches!(
+        ext_lowercase(path).as_deref(),
+        Some(
+            // markdown & plain text
+            "md" | "markdown" | "mdown" | "mkd" | "text" | "txt"
+            // code (must stay in sync with DocKind::for_path)
+            | "json" | "jsonc" | "py" | "rs"
+            | "js" | "mjs" | "cjs" | "jsx" | "ts" | "tsx"
+            | "sh" | "bash" | "zsh" | "go" | "html" | "htm"
+            | "css" | "yaml" | "yml" | "toml"
+            // converted containers (read-only)
+            | "docx" | "hwpx" | "pdf"
+        )
+    )
+}
+
 /// Read any supported document as displayable text. Plain-text formats are
 /// read directly; container formats are converted to Markdown.
 pub fn read_document(path: &Path) -> io::Result<String> {

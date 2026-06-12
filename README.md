@@ -77,7 +77,8 @@ reloading with unsaved edits asks to save first.
 Settings live at `~/Library/Application Support/MarkForge/settings.json` —
 ⌘, opens that file *in MarkForge itself*; save (⌘S) and the changes apply
 instantly. Keys include `theme`, `zoom`, `body_font_size`, `preview_font`,
-`editor_font`, `syntax_theme`, `sidebar_open`, `preview_padding`, and
+`editor_font`, `syntax_theme`, `sidebar_open`, `preview_padding`,
+`backdrop_opacity` (0.2–1.0 window-gradient transparency), and
 `sidebar_bg_dark`.
 
 ## Building

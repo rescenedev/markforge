@@ -17,8 +17,8 @@ use std::path::PathBuf;
 
 use gpui::prelude::*;
 use gpui::{
-    Action, App, Bounds, Focusable, KeyBinding, Menu, MenuItem, WindowBounds, WindowKind,
-    WindowOptions, actions, px, size,
+    Action, App, Bounds, Focusable, KeyBinding, Menu, MenuItem, WindowBackgroundAppearance,
+    WindowBounds, WindowKind, WindowOptions, actions, px, size,
 };
 use gpui_component::{Root, TitleBar};
 use gpui_component_assets::Assets;
@@ -225,6 +225,9 @@ fn open_main_window(initial_path: Option<PathBuf>, cx: &mut App) {
         titlebar: Some(TitleBar::title_bar_options()),
         window_min_size: Some(size(px(480.), px(360.))),
         kind: WindowKind::Normal,
+        // The root view paints a slightly translucent gradient, so what's
+        // behind the window shows through as a faint blur (macOS vibrancy).
+        window_background: WindowBackgroundAppearance::Blurred,
         ..Default::default()
     };
 
