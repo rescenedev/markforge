@@ -1,8 +1,9 @@
 //! File-explorer data model for the sidebar.
 //!
-//! Holds the opened root directory, the set of expanded folders, and a cache of
-//! directory listings (read lazily on expand). `rows()` flattens the visible
-//! tree into a list the view renders.
+//! Tracks which folders are expanded and caches directory listings (read
+//! lazily on expand). The sidebar is a multi-root tree: any folder (a PLACES
+//! entry, a favorite, an iCloud-notes folder, an opened folder) can be
+//! expanded in place. [`rows_under`] flattens one root's visible subtree.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -29,13 +30,13 @@ pub struct Row {
 
 #[derive(Default)]
 pub struct FileTree {
-    root: Option<PathBuf>,
     expanded: HashSet<PathBuf>,
     cache: HashMap<PathBuf, Vec<FsEntry>>,
-    /// Flattened visible rows, rebuilt lazily after any mutation — `rows()`
-    /// is called every frame (and several times per keystroke during tree
-    /// navigation), so walking the tree each time causes visible jank.
-    rows_cache: RefCell<Option<Rc<Vec<Row>>>>,
+    /// Bumped on every mutation to invalidate the per-root row caches.
+    generation: u64,
+    /// One flattened subtree per root, cached until `generation` changes —
+    /// `rows_under` runs every frame, so re-walking large folders janks.
+    rows_cache: RefCell<HashMap<PathBuf, (u64, Rc<Vec<Row>>)>>,
 }
 
 impl FileTree {
@@ -43,31 +44,10 @@ impl FileTree {
         Self::default()
     }
 
-    pub fn root(&self) -> Option<&Path> {
-        self.root.as_deref()
-    }
-
-    pub fn is_open(&self) -> bool {
-        self.root.is_some()
-    }
-
-    fn invalidate_rows(&self) {
-        *self.rows_cache.borrow_mut() = None;
-    }
-
-    /// Open a new root directory (resets expansion + cache).
-    pub fn open(&mut self, root: PathBuf) {
-        self.expanded.clear();
-        self.cache.clear();
-        self.ensure(&root);
-        self.root = Some(root);
-        self.invalidate_rows();
-    }
-
     /// Toggle a directory's expanded state, reading its contents on first
     /// open. Returns `true` when the directory is now expanded.
     pub fn toggle(&mut self, dir: &Path) -> bool {
-        self.invalidate_rows();
+        self.generation = self.generation.wrapping_add(1);
         if self.expanded.remove(dir) {
             false
         } else {
@@ -77,28 +57,30 @@ impl FileTree {
         }
     }
 
-    /// Re-read the root and expanded directories from disk (manual refresh).
-    /// Listings cached for collapsed directories are dropped, so the cache
-    /// can't grow without bound across a long session.
+    /// Expand a directory (no-op if already expanded).
+    pub fn expand(&mut self, dir: &Path) {
+        if !self.expanded.contains(dir) {
+            self.expanded.insert(dir.to_path_buf());
+            self.ensure(dir);
+            self.generation = self.generation.wrapping_add(1);
+        }
+    }
+
+    /// Re-read every expanded directory from disk (manual refresh).
     pub fn refresh(&mut self) {
         self.cache.clear();
-        if let Some(root) = self.root.clone() {
-            self.ensure(&root);
-        }
         let dirs: Vec<PathBuf> = self.expanded.iter().cloned().collect();
         for d in dirs {
             self.ensure(&d);
         }
-        self.invalidate_rows();
+        self.generation = self.generation.wrapping_add(1);
     }
 
-    /// Collapse all expanded folders and drop their cached listings.
+    /// Collapse every folder and drop cached listings.
     pub fn collapse_all(&mut self) {
         self.expanded.clear();
-        let root = self.root.clone();
-        self.cache
-            .retain(|dir, _| Some(dir.as_path()) == root.as_deref());
-        self.invalidate_rows();
+        self.cache.clear();
+        self.generation = self.generation.wrapping_add(1);
     }
 
     fn ensure(&mut self, dir: &Path) {
@@ -107,18 +89,32 @@ impl FileTree {
         }
     }
 
-    /// Flatten the visible tree (root's contents + expanded descendants).
-    /// Cached until the next mutation.
-    pub fn rows(&self) -> Rc<Vec<Row>> {
-        if let Some(rows) = self.rows_cache.borrow().as_ref() {
-            return rows.clone();
+    /// Rows for `root` as an expandable subtree: the root itself at depth 0,
+    /// then its expanded descendants. Cached per generation.
+    pub fn rows_under(&self, root: &Path) -> Rc<Vec<Row>> {
+        if let Some((cached_gen, rows)) = self.rows_cache.borrow().get(root) {
+            if *cached_gen == self.generation {
+                return rows.clone();
+            }
         }
         let mut out = Vec::new();
-        if let Some(root) = &self.root {
-            self.walk(root, 0, &mut out);
+        let name = root
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| root.to_string_lossy().to_string());
+        let expanded = self.expanded.contains(root);
+        out.push(Row {
+            entry: FsEntry { path: root.to_path_buf(), name, is_dir: true },
+            depth: 0,
+            expanded,
+        });
+        if expanded {
+            self.walk(root, 1, &mut out);
         }
         let rows = Rc::new(out);
-        *self.rows_cache.borrow_mut() = Some(rows.clone());
+        self.rows_cache
+            .borrow_mut()
+            .insert(root.to_path_buf(), (self.generation, rows.clone()));
         rows
     }
 
@@ -128,11 +124,7 @@ impl FileTree {
         };
         for e in entries {
             let expanded = e.is_dir && self.expanded.contains(&e.path);
-            out.push(Row {
-                entry: e.clone(),
-                depth,
-                expanded,
-            });
+            out.push(Row { entry: e.clone(), depth, expanded });
             if expanded {
                 self.walk(&e.path, depth + 1, out);
             }

@@ -32,7 +32,7 @@ use gpui_component::{
     v_flex,
 };
 
-use crate::file_tree::FileTree;
+use crate::file_tree::{FileTree, FsEntry, Row};
 use crate::git::{FileState, RepoStatus};
 use crate::import::{is_imported_doc, is_supported_doc, read_document};
 use crate::rem_scaled::RemScaled;
@@ -126,6 +126,13 @@ impl DocKind {
     }
 }
 
+/// One row of the sidebar: a collapsible section header or a tree row
+/// (a folder/file under some root, indented by depth).
+enum SbItem {
+    Header(&'static str),
+    Row(Row),
+}
+
 /// Decision from a single file-watch poll.
 enum WatchOutcome {
     /// The file changed on disk and a reload should proceed.
@@ -188,6 +195,8 @@ pub struct MarkForge {
     shortcut_fav_files: Vec<PathBuf>,
     /// Top-level folders of imported iCloud Notes (the iCLOUD NOTES section).
     shortcut_notes: Vec<PathBuf>,
+    /// Folders explicitly opened (⌘⇧O / drop / CLI), shown in the OPEN section.
+    opened_roots: Vec<PathBuf>,
     /// Sidebar section headers the user has collapsed.
     collapsed_sections: std::collections::HashSet<String>,
     /// Commit-message field at the bottom of the sidebar.
@@ -276,6 +285,7 @@ impl MarkForge {
             shortcut_fav_dirs: Vec::new(),
             shortcut_fav_files: Vec::new(),
             shortcut_notes: Vec::new(),
+            opened_roots: Vec::new(),
             collapsed_sections: settings.collapsed_sections.iter().cloned().collect(),
             commit_input,
             _subscriptions: vec![input_sub, commit_sub, appearance_sub],
@@ -476,14 +486,6 @@ impl MarkForge {
 
         if self.doc_cache.len() < DOC_CACHE_MAX_ENTRIES {
             self.doc_cache.insert(path.clone(), CachedDoc { modified, text });
-        }
-
-        // Populate the sidebar with the file's folder if none is open.
-        if !self.file_tree.is_open() {
-            if let Some(parent) = path.parent() {
-                self.file_tree.open(parent.to_path_buf());
-                self.preload_dir(parent.to_path_buf(), cx);
-            }
         }
 
         if let Some(parent) = path.parent() {
@@ -708,27 +710,15 @@ impl MarkForge {
         .detach();
     }
 
-    /// Open `path` as the tree root — or, when it already is, reset the view
-    /// (collapse + scroll to top) so the click always responds visibly.
-    fn open_or_reveal_folder(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if self.file_tree.root() == Some(path.as_path()) {
-            self.file_tree.collapse_all();
-            self.tree_cursor = None;
-            self.tree_scroll.scroll_to_item(0);
-            self.sidebar_open = true;
-            cx.notify();
-        } else {
-            self.open_folder(path, cx);
-        }
-    }
-
-    /// Open `path` in the sidebar file tree and record it as recent.
+    /// Add `path` to the OPEN section as an expandable root, expand it, and
+    /// reveal it. Folders are browsed in place — no separate root tree.
     fn open_folder(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.file_tree.open(path.clone());
         self.sidebar_open = true;
-        self.tree_cursor = None;
-        // New root: stale cache entries are useless now; preload the new dir.
-        self.doc_cache.clear();
+        self.opened_roots.retain(|p| p != &path);
+        self.opened_roots.insert(0, path.clone());
+        self.opened_roots.truncate(8);
+        self.file_tree.expand(&path);
+        self.tree_cursor = Some(path.clone());
         self.preload_dir(path.clone(), cx);
         self.start_git_poll(path.clone(), cx);
         let settings = cx.global_mut::<Settings>();
@@ -748,12 +738,7 @@ impl MarkForge {
         cx: &mut Context<Self>,
     ) {
         let branch = action.0.clone();
-        let Some(dir) = self
-            .git
-            .root
-            .clone()
-            .or_else(|| self.file_tree.root().map(Path::to_path_buf))
-        else {
+        let Some(dir) = self.git.root.clone().or_else(|| self.git_dir()) else {
             return;
         };
 
@@ -793,12 +778,14 @@ impl MarkForge {
         });
     }
 
-    /// The directory git commands should run in (repo root, else tree root).
+    /// The directory git commands should run in (repo root, else the open
+    /// document's folder, else the most recently opened folder).
     fn git_dir(&self) -> Option<PathBuf> {
         self.git
             .root
             .clone()
-            .or_else(|| self.file_tree.root().map(Path::to_path_buf))
+            .or_else(|| self.file_path.as_ref().and_then(|p| p.parent().map(Path::to_path_buf)))
+            .or_else(|| self.opened_roots.first().cloned())
     }
 
     /// ⌘D — toggle a `git diff HEAD` view of the current file in the preview.
@@ -1099,8 +1086,8 @@ impl MarkForge {
         if let Some(parent) = self.file_path.as_ref().and_then(|p| p.parent()) {
             candidates.push(parent.to_path_buf());
         }
-        if let Some(root) = self.file_tree.root() {
-            candidates.push(root.to_path_buf());
+        if let Some(root) = self.opened_roots.first() {
+            candidates.push(root.clone());
         }
 
         let task = cx.spawn(async move |this, cx| {
@@ -1238,14 +1225,10 @@ impl MarkForge {
         .detach();
     }
 
-    fn on_toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_toggle_sidebar(&mut self, _: &ToggleSidebar, _window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_open = !self.sidebar_open;
         cx.global_mut::<Settings>().sidebar_open = self.sidebar_open;
         save_settings(cx);
-        // Opening the sidebar with no folder yet → jump straight to the picker.
-        if self.sidebar_open && !self.file_tree.is_open() {
-            self.prompt_open_folder(window, cx);
-        }
         cx.notify();
     }
 
@@ -1274,22 +1257,10 @@ impl MarkForge {
         }
     }
 
-    /// Whether arrow-key tree navigation should respond right now.
-    fn tree_nav_active(&self) -> bool {
-        self.sidebar_open && self.file_tree.is_open()
-    }
-
-    /// Index of the keyboard cursor in the visible rows.
-    fn tree_cursor_index(&self, rows: &[crate::file_tree::Row]) -> Option<usize> {
+    /// Position of the keyboard cursor among the selectable rows.
+    fn cursor_pos(&self, sel: &[(usize, Row)]) -> Option<usize> {
         let cursor = self.tree_cursor.as_ref()?;
-        rows.iter().position(|r| &r.entry.path == cursor)
-    }
-
-    fn set_tree_cursor(&mut self, rows: &[crate::file_tree::Row], index: usize) {
-        if let Some(row) = rows.get(index) {
-            self.tree_cursor = Some(row.entry.path.clone());
-            self.tree_scroll.scroll_to_item(index);
-        }
+        sel.iter().position(|(_, r)| &r.entry.path == cursor)
     }
 
     fn on_tree_up(&mut self, _: &TreeUp, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1301,64 +1272,77 @@ impl MarkForge {
     }
 
     fn move_tree_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
-        if !self.tree_nav_active() {
+        if !self.sidebar_open {
             return;
         }
-        let rows = self.file_tree.rows();
-        if rows.is_empty() {
+        let items = self.sidebar_items();
+        let sel = self.selectable_rows(&items);
+        if sel.is_empty() {
             return;
         }
-        let last = rows.len() - 1;
-        let next = match self.tree_cursor_index(&rows) {
-            Some(i) => (i as isize + delta).clamp(0, last as isize) as usize,
-            // No cursor yet: start from the open file, else from an end.
-            None => self
-                .file_path
-                .as_ref()
-                .and_then(|p| rows.iter().position(|r| &r.entry.path == p))
-                .unwrap_or(if delta > 0 { 0 } else { last }),
+        let last = sel.len() as isize - 1;
+        let next = match self.cursor_pos(&sel) {
+            Some(p) => (p as isize + delta).clamp(0, last) as usize,
+            None => {
+                if delta > 0 {
+                    0
+                } else {
+                    last as usize
+                }
+            }
         };
-        self.set_tree_cursor(&rows, next);
+        let (idx, row) = &sel[next];
+        self.tree_cursor = Some(row.entry.path.clone());
+        self.tree_scroll.scroll_to_item(*idx);
         cx.notify();
     }
 
     /// ← collapses an expanded folder, otherwise jumps to the parent row.
     fn on_tree_left(&mut self, _: &TreeLeft, _window: &mut Window, cx: &mut Context<Self>) {
-        if !self.tree_nav_active() {
+        if !self.sidebar_open {
             return;
         }
-        let rows = self.file_tree.rows();
-        let Some(i) = self.tree_cursor_index(&rows) else {
+        let items = self.sidebar_items();
+        let sel = self.selectable_rows(&items);
+        let Some(pos) = self.cursor_pos(&sel) else {
             self.move_tree_cursor(1, cx);
             return;
         };
-        let row = &rows[i];
+        let (_, row) = sel[pos].clone();
         if row.entry.is_dir && row.expanded {
             self.file_tree.toggle(&row.entry.path);
-        } else if let Some(parent) = rows[..i].iter().rposition(|r| r.depth < row.depth) {
-            self.set_tree_cursor(&rows, parent);
+        } else if row.depth > 0 {
+            if let Some(pp) = sel[..pos].iter().rposition(|(_, r)| r.depth < row.depth) {
+                let (idx, prow) = &sel[pp];
+                self.tree_cursor = Some(prow.entry.path.clone());
+                self.tree_scroll.scroll_to_item(*idx);
+            }
         }
         cx.notify();
     }
 
     /// → expands a collapsed folder; on an expanded one, steps into it.
     fn on_tree_right(&mut self, _: &TreeRight, _window: &mut Window, cx: &mut Context<Self>) {
-        if !self.tree_nav_active() {
+        if !self.sidebar_open {
             return;
         }
-        let rows = self.file_tree.rows();
-        let Some(i) = self.tree_cursor_index(&rows) else {
+        let items = self.sidebar_items();
+        let sel = self.selectable_rows(&items);
+        let Some(pos) = self.cursor_pos(&sel) else {
             self.move_tree_cursor(1, cx);
             return;
         };
-        let row = &rows[i];
+        let (_, row) = sel[pos].clone();
         if row.entry.is_dir {
             if !row.expanded {
                 if self.file_tree.toggle(&row.entry.path) {
                     self.preload_dir(row.entry.path.clone(), cx);
                 }
-            } else if rows.get(i + 1).is_some_and(|r| r.depth == row.depth + 1) {
-                self.set_tree_cursor(&rows, i + 1);
+            } else if let Some((idx, crow)) =
+                sel.get(pos + 1).filter(|(_, r)| r.depth == row.depth + 1)
+            {
+                self.tree_cursor = Some(crow.entry.path.clone());
+                self.tree_scroll.scroll_to_item(*idx);
             }
         }
         cx.notify();
@@ -1366,14 +1350,15 @@ impl MarkForge {
 
     /// Enter opens the file (or toggles the folder) under the cursor.
     fn on_tree_confirm(&mut self, _: &TreeConfirm, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.tree_nav_active() {
+        if !self.sidebar_open {
             return;
         }
-        let rows = self.file_tree.rows();
-        let Some(i) = self.tree_cursor_index(&rows) else {
+        let items = self.sidebar_items();
+        let sel = self.selectable_rows(&items);
+        let Some(pos) = self.cursor_pos(&sel) else {
             return;
         };
-        let row = rows[i].clone();
+        let (_, row) = sel[pos].clone();
         self.on_tree_entry(row.entry.path, row.entry.is_dir, window, cx);
     }
 
@@ -1929,6 +1914,115 @@ impl MarkForge {
     }
 
     /// VSCode-style file-explorer sidebar.
+    /// Render one tree row (folder or file), indented by depth. `index` makes
+    /// the element id unique (the same path can appear in two sections).
+    fn render_tree_row(&self, cx: &Context<Self>, row: Row, index: usize) -> gpui::AnyElement {
+        let theme = cx.theme();
+        let weak = cx.entity().downgrade();
+        let git = self.git.clone();
+        let accent = gpui::hsla(0.586, 0.92, 0.52, 1.0);
+        let on_accent = gpui::hsla(0., 0., 1., 1.);
+        let hover_bg = gpui::hsla(0.586, 0.92, 0.52, 0.24);
+
+        let path = row.entry.path.clone();
+        let is_dir = row.entry.is_dir;
+        let selected = self.tree_cursor.as_deref() == Some(path.as_path());
+
+        let git_state = git.state_of(&path);
+        let dir_dirty = is_dir && git_state.is_none() && git.dir_is_dirty(&path);
+        let git_color = git_state.map(|s| match s {
+            FileState::Conflicted => gpui::hsla(0.0, 0.85, 0.62, 1.0),
+            FileState::Modified => gpui::hsla(0.105, 0.59, 0.72, 1.0),
+            FileState::Staged => gpui::hsla(0.36, 0.42, 0.62, 1.0),
+            FileState::Untracked => gpui::hsla(0.39, 0.42, 0.62, 1.0),
+        });
+
+        let name_color = if selected {
+            on_accent
+        } else if let Some(c) = git_color {
+            c
+        } else {
+            theme.sidebar_foreground
+        };
+        let chevron_color = if selected { on_accent } else { theme.muted_foreground };
+        let icon_color = if selected {
+            on_accent
+        } else if is_dir {
+            theme.foreground
+        } else {
+            theme.muted_foreground
+        };
+
+        let lead = if is_dir {
+            Icon::new(if row.expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            })
+            .size(px(16.))
+            .text_color(chevron_color)
+            .into_any_element()
+        } else {
+            div().w(px(16.)).into_any_element()
+        };
+
+        let type_icon = Icon::new(if !is_dir {
+            IconName::File
+        } else if row.expanded {
+            IconName::FolderOpen
+        } else {
+            IconName::Folder
+        })
+        .size(px(17.))
+        .text_color(icon_color);
+
+        div()
+            .id(SharedString::from(format!("row-{index}")))
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .h(px(32.))
+            .rounded_md()
+            .pl(px(8. + row.depth as f32 * 14.))
+            .pr_2()
+            .text_size(px(15.))
+            .text_color(name_color)
+            .cursor_pointer()
+            .when(selected, |this| this.bg(accent).font_medium())
+            .when(!selected, |this| this.hover(|this| this.bg(hover_bg)))
+            .child(lead)
+            .child(type_icon)
+            .child(div().flex_1().min_w(px(0.)).truncate().child(row.entry.name.clone()))
+            .when_some(git_state, |this, state| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(if selected {
+                            on_accent
+                        } else {
+                            git_color.unwrap_or(theme.muted_foreground)
+                        })
+                        .child(state.badge()),
+                )
+            })
+            .when(dir_dirty, |this| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(gpui::hsla(0.105, 0.59, 0.72, 1.0))
+                        .child("•"),
+                )
+            })
+            .on_click(move |_, window, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    this.on_tree_entry(path.clone(), is_dir, window, cx)
+                });
+            })
+            .into_any_element()
+    }
+
     fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let weak = cx.entity().downgrade();
@@ -1950,9 +2044,11 @@ impl MarkForge {
             theme.sidebar.alpha(sidebar_alpha)
         };
 
+        // Header names the git repo of the open document, else a generic label.
         let header_title = self
-            .file_tree
-            .root()
+            .git
+            .root
+            .as_ref()
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().to_uppercase())
             .unwrap_or_else(|| "EXPLORER".to_string());
@@ -2020,214 +2116,58 @@ impl MarkForge {
                                 window.dispatch_action(Box::new(OpenFolder), cx)
                             }),
                     )
-                    .when(self.file_tree.is_open(), |this| {
+                    .child({
                         let w1 = weak.clone();
+                        Button::new("sb-refresh")
+                            .icon(IconName::Redo)
+                            .ghost()
+                            .xsmall()
+                            .tooltip("Refresh")
+                            .on_click(move |_, _, cx| {
+                                let _ = w1.update(cx, |this, cx| {
+                                    this.file_tree.refresh();
+                                    cx.notify();
+                                });
+                            })
+                    })
+                    .child({
                         let w2 = weak.clone();
-                        this.child(
-                            Button::new("sb-refresh")
-                                .icon(IconName::Redo)
-                                .ghost()
-                                .xsmall()
-                                .tooltip("Refresh")
-                                .on_click(move |_, _, cx| {
-                                    let _ = w1.update(cx, |this, cx| {
-                                        this.file_tree.refresh();
-                                        cx.notify();
-                                    });
-                                }),
-                        )
-                        .child(
-                            Button::new("sb-collapse")
-                                .icon(IconName::ChevronUp)
-                                .ghost()
-                                .xsmall()
-                                .tooltip("Collapse All")
-                                .on_click(move |_, _, cx| {
-                                    let _ = w2.update(cx, |this, cx| {
-                                        this.file_tree.collapse_all();
-                                        cx.notify();
-                                    });
-                                }),
-                        )
+                        Button::new("sb-collapse")
+                            .icon(IconName::ChevronUp)
+                            .ghost()
+                            .xsmall()
+                            .tooltip("Collapse All")
+                            .on_click(move |_, _, cx| {
+                                let _ = w2.update(cx, |this, cx| {
+                                    this.file_tree.collapse_all();
+                                    cx.notify();
+                                });
+                            })
                     }),
             );
 
-        let body = if !self.file_tree.is_open() {
-            v_flex()
-                .flex_1()
-                .w_full()
-                .min_h(px(0.))
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .p_4()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child("No folder opened"),
-                )
-                .child(
-                    Button::new("sb-open-empty")
-                        .primary()
-                        .small()
-                        .label("Open Folder")
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(OpenFolder), cx)
-                        }),
-                )
-                .into_any_element()
-        } else {
-            let rows = self.file_tree.rows();
-            let cursor = self.tree_cursor.clone();
-            let git = self.git.clone();
-            // macOS system accent blue (selectedContentBackgroundColor), white on top.
-            let accent = gpui::hsla(0.586, 0.92, 0.52, 1.0);
-            let on_accent = gpui::hsla(0., 0., 1., 1.);
-            // A blue tint for hover — clearly visible, ties to the selection.
-            let hover_bg = gpui::hsla(0.586, 0.92, 0.52, 0.24);
-            // The keyboard cursor: stronger than hover, weaker than selection.
-            // Subordinate to the open-document accent: a gentle keyboard-focus
-            // tint, not a second "selection".
-            let tree_rows = rows.iter().cloned().map(move |row| {
-                    let path = row.entry.path.clone();
-                    let is_dir = row.entry.is_dir;
-                    // One selection = the last clicked/opened row, file OR
-                    // folder. The cursor IS the selection.
-                    let selected = cursor.as_deref() == Some(path.as_path());
-                    let id = SharedString::from(path.to_string_lossy().to_string());
-
-                    // Git decorations (VSCode palette): badge + name tint.
-                    let git_state = git.state_of(&path);
-                    let dir_dirty = is_dir && git_state.is_none() && git.dir_is_dirty(&path);
-                    let git_color = git_state.map(|s| match s {
-                        FileState::Conflicted => gpui::hsla(0.0, 0.85, 0.62, 1.0),
-                        FileState::Modified => gpui::hsla(0.105, 0.59, 0.72, 1.0),
-                        FileState::Staged => gpui::hsla(0.36, 0.42, 0.62, 1.0),
-                        FileState::Untracked => gpui::hsla(0.39, 0.42, 0.62, 1.0),
-                    });
-
-                    let name_color = if selected {
-                        on_accent
-                    } else if let Some(c) = git_color {
-                        c
-                    } else {
-                        theme.sidebar_foreground
-                    };
-                    let chevron_color = if selected { on_accent } else { theme.muted_foreground };
-                    let icon_color = if selected {
-                        on_accent
-                    } else if is_dir {
-                        theme.foreground
-                    } else {
-                        theme.muted_foreground
-                    };
-
-                    // Leading chevron (folders) or spacer (files).
-                    let lead = if is_dir {
-                        Icon::new(if row.expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .size(px(16.))
-                        .text_color(chevron_color)
-                        .into_any_element()
-                    } else {
-                        div().w(px(16.)).into_any_element()
-                    };
-
-                    let type_icon = Icon::new(if !is_dir {
-                        IconName::File
-                    } else if row.expanded {
-                        IconName::FolderOpen
-                    } else {
-                        IconName::Folder
-                    })
-                    .size(px(17.))
-                    .text_color(icon_color);
-
-                    let weak = weak.clone();
-                    div()
-                        .id(id)
-                        .flex()
-                        .items_center()
-                        .gap_1p5()
-                        .h(px(32.))
-                        .rounded_md()
-                        .pl(px(8. + row.depth as f32 * 14.))
-                        .pr_2()
-                        .text_size(px(15.))
-                        .text_color(name_color)
-                        .cursor_pointer()
-                        // Exactly one accent-filled row: the selected entry
-                        // (whatever you last clicked or opened, file or folder).
-                        .when(selected, |this| this.bg(accent).font_medium())
-                        .when(!selected, |this| this.hover(|this| this.bg(hover_bg)))
-                        .child(lead)
-                        .child(type_icon)
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .truncate()
-                                .child(row.entry.name.clone()),
-                        )
-                        .when_some(git_state, |this, state| {
-                            this.child(
-                                div()
-                                    .flex_none()
-                                    .text_xs()
-                                    .text_color(if selected {
-                                        on_accent
-                                    } else {
-                                        git_color.unwrap_or(theme.muted_foreground)
-                                    })
-                                    .child(state.badge()),
-                            )
-                        })
-                        .when(dir_dirty, |this| {
-                            this.child(
-                                div()
-                                    .flex_none()
-                                    .text_xs()
-                                    .text_color(gpui::hsla(0.105, 0.59, 0.72, 1.0))
-                                    .child("•"),
-                            )
-                        })
-                        .on_click(move |_, window, cx| {
-                            let _ = weak.update(cx, |this, cx| {
-                                this.on_tree_entry(path.clone(), is_dir, window, cx)
-                            });
-                        })
-                        .into_any_element()
-                });
-
-            // One continuous scroll area: PLACES/FAVORITES/iCLOUD NOTES
-            // sections expand in place, flowing straight into the file tree.
-            let mut items = self.shortcut_items(cx);
-            items.extend(tree_rows);
-
-            v_flex()
-                .id("sidebar-scroll")
-                .flex_1()
-                .w_full()
-                .min_h(px(0.))
-                .py_1()
-                .px_1p5()
-                .overflow_y_scroll()
-                .track_scroll(&self.tree_scroll)
-                .children(items)
-                .into_any_element()
-        };
+        // One continuous scroll area: OPEN / PLACES / FAVORITES / iCLOUD NOTES
+        // section headers interleaved with tree rows that expand in place.
+        let items = self.sidebar_items();
+        let body = v_flex()
+            .id("sidebar-scroll")
+            .flex_1()
+            .w_full()
+            .min_h(px(0.))
+            .py_1()
+            .px_1p5()
+            .overflow_y_scroll()
+            .track_scroll(&self.tree_scroll)
+            .children(items.into_iter().enumerate().map(|(i, it)| match it {
+                SbItem::Header(title) => self.section_header(cx, title).into_any_element(),
+                SbItem::Row(row) => self.render_tree_row(cx, row, i),
+            }));
 
         // Commit panel: only when the current git context is a repository.
         let commit_panel = self.git.root.clone().map(|repo_root| {
             let changes = self.git.files.len();
-            // In a multi-repo workspace, say which repo this panel acts on.
-            let repo_name = (Some(repo_root.as_path()) != self.file_tree.root())
-                .then(|| repo_root.file_name().map(|n| n.to_string_lossy().to_string()))
-                .flatten();
+            // Name the repo this panel acts on (it follows the open document).
+            let repo_name = repo_root.file_name().map(|n| n.to_string_lossy().to_string());
             let count_label = match changes {
                 0 => "No changes".to_string(),
                 1 => "1 change".to_string(),
@@ -2338,67 +2278,52 @@ impl MarkForge {
             .children(commit_panel)
     }
 
-    /// One clickable shortcut row (used by PLACES and FAVORITES).
-    fn shortcut_row(
-        &self,
-        cx: &Context<Self>,
-        path: PathBuf,
-        label: String,
-        is_dir: bool,
-    ) -> impl IntoElement {
-        let theme = cx.theme();
-        let weak = cx.entity().downgrade();
-        let hover_bg = gpui::hsla(0.586, 0.92, 0.52, 0.24);
-        // Shortcuts are quick-launch buttons, never a persistent selection:
-        // the *only* highlighted row in the sidebar is the open document, in
-        // the tree below. Shortcuts just get a transient hover.
-        let id = SharedString::from(format!("shortcut-{}", path.to_string_lossy()));
-
-        div()
-            .id(id)
-            .flex()
-            .items_center()
-            .gap_1p5()
-            .h(px(32.))
-            .rounded_md()
-            .pl_2()
-            .pr_2()
-            .text_size(px(15.))
-            .cursor_pointer()
-            .text_color(theme.sidebar_foreground)
-            .hover(|this| this.bg(hover_bg))
-            .child(
-                Icon::new(if is_dir { IconName::Folder } else { IconName::File })
-                    .size(px(16.))
-                    .text_color(theme.muted_foreground),
-            )
-            .child(div().flex_1().min_w(px(0.)).truncate().child(label))
-            .on_click(move |_, window, cx| {
-                let path = path.clone();
-                let _ = weak.update(cx, |this, cx| {
-                    if is_dir {
-                        this.open_or_reveal_folder(path, cx);
-                    } else {
-                        this.guard_unsaved(window, cx, move |this, window, cx| {
-                            this.load_path(path, window, cx)
-                        });
-                    }
-                });
-            })
-    }
-
     /// Recompute the cached PLACES / FAVORITES shortcut lists. Called when
     /// usage changes — never during render (it sorts and stats paths).
     fn refresh_shortcuts(&mut self, cx: &App) {
         let mut places: Vec<(String, PathBuf)> = Vec::new();
         if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-            for (label, p) in [
+            // Home itself, then the standard user folders + iCloud Drive, then
+            // any other non-hidden top-level folder under home.
+            let icloud = home.join("Library/Mobile Documents/com~apple~CloudDocs");
+            let standard: [(&str, PathBuf); 8] = [
                 ("Home", home.clone()),
                 ("Desktop", home.join("Desktop")),
+                ("Documents", home.join("Documents")),
                 ("Downloads", home.join("Downloads")),
-            ] {
+                ("iCloud Drive", icloud),
+                ("Movies", home.join("Movies")),
+                ("Music", home.join("Music")),
+                ("Pictures", home.join("Pictures")),
+            ];
+            for (label, p) in &standard {
                 if p.is_dir() {
-                    places.push((label.to_string(), p));
+                    places.push((label.to_string(), p.clone()));
+                }
+            }
+            // Other top-level folders under home (e.g. project dirs), excluding
+            // the noisy system/hidden ones and the standards already listed.
+            let skip = ["Library", "Applications", "Public"];
+            if let Ok(rd) = std::fs::read_dir(&home) {
+                let mut extra: Vec<PathBuf> = rd
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.is_dir()
+                            && !p.file_name().is_some_and(|n| {
+                                let n = n.to_string_lossy();
+                                n.starts_with('.')
+                                    || skip.contains(&n.as_ref())
+                                    || standard.iter().any(|(_, sp)| sp == p)
+                            })
+                    })
+                    .collect();
+                extra.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
+                for p in extra {
+                    let name = p.file_name().map(|n| n.to_string_lossy().to_string());
+                    if let Some(name) = name {
+                        places.push((name, p));
+                    }
                 }
             }
         }
@@ -2428,6 +2353,87 @@ impl MarkForge {
         );
         self.shortcut_fav_files = settings.top_usage(|p| p.is_file(), 3);
         self.shortcut_places = places;
+    }
+
+    /// The full ordered sidebar: section headers interleaved with expandable
+    /// tree rows for OPEN / PLACES / FAVORITES / iCLOUD NOTES. Folders expand
+    /// in place; there is no separate root tree.
+    fn sidebar_items(&self) -> Vec<SbItem> {
+        let mut items = Vec::new();
+        let shown = |t: &str| !self.collapsed_sections.contains(t);
+        let name_of = |p: &Path| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| p.to_string_lossy().to_string())
+        };
+
+        let add_dir = |items: &mut Vec<SbItem>, label: &str, p: &Path| {
+            let rows = self.file_tree.rows_under(p);
+            for (i, row) in rows.iter().enumerate() {
+                let mut row = row.clone();
+                if i == 0 {
+                    row.entry.name = label.to_string(); // custom root label
+                }
+                items.push(SbItem::Row(row));
+            }
+        };
+
+        if !self.opened_roots.is_empty() {
+            items.push(SbItem::Header("OPEN"));
+            if shown("OPEN") {
+                for p in &self.opened_roots {
+                    let label = name_of(p);
+                    add_dir(&mut items, &label, p);
+                }
+            }
+        }
+        if !self.shortcut_places.is_empty() {
+            items.push(SbItem::Header("PLACES"));
+            if shown("PLACES") {
+                for (label, p) in &self.shortcut_places {
+                    add_dir(&mut items, label, p);
+                }
+            }
+        }
+        if !self.shortcut_fav_dirs.is_empty() || !self.shortcut_fav_files.is_empty() {
+            items.push(SbItem::Header("FAVORITES"));
+            if shown("FAVORITES") {
+                for p in &self.shortcut_fav_dirs {
+                    let label = name_of(p);
+                    add_dir(&mut items, &label, p);
+                }
+                for p in &self.shortcut_fav_files {
+                    items.push(SbItem::Row(Row {
+                        entry: FsEntry { path: p.clone(), name: name_of(p), is_dir: false },
+                        depth: 0,
+                        expanded: false,
+                    }));
+                }
+            }
+        }
+        if !self.shortcut_notes.is_empty() {
+            items.push(SbItem::Header("ICLOUD NOTES"));
+            if shown("ICLOUD NOTES") {
+                for p in &self.shortcut_notes {
+                    let label = name_of(p);
+                    add_dir(&mut items, &label, p);
+                }
+            }
+        }
+        items
+    }
+
+    /// (item index, row) pairs for the selectable rows, used by arrow-key nav
+    /// (the index addresses the scroll container's children for scroll-to).
+    fn selectable_rows(&self, items: &[SbItem]) -> Vec<(usize, Row)> {
+        items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, it)| match it {
+                SbItem::Row(r) => Some((i, r.clone())),
+                SbItem::Header(_) => None,
+            })
+            .collect()
     }
 
     /// Collapse/expand a sidebar section header, persisting the choice.
@@ -2468,56 +2474,6 @@ impl MarkForge {
             .on_click(move |_, _, cx| {
                 let _ = weak.update(cx, |this, cx| this.toggle_section(title, cx));
             })
-    }
-
-    /// Collapsible PLACES, FAVORITES and (once imported) iCLOUD NOTES sections,
-    /// returned as a flat list so they share the file tree's single scroll
-    /// area — sections expand in place, no separate top block.
-    fn shortcut_items(&self, cx: &Context<Self>) -> Vec<gpui::AnyElement> {
-        let places = self.shortcut_places.clone();
-        let fav_folders = self.shortcut_fav_dirs.clone();
-        let fav_files = self.shortcut_fav_files.clone();
-        let notes = self.shortcut_notes.clone();
-
-        let display_name = |p: &Path| {
-            p.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| p.to_string_lossy().to_string())
-        };
-        let shown = |title: &str| !self.collapsed_sections.contains(title);
-
-        let mut items: Vec<gpui::AnyElement> = Vec::new();
-        if !places.is_empty() {
-            items.push(self.section_header(cx, "PLACES").into_any_element());
-            if shown("PLACES") {
-                for (label, p) in places {
-                    items.push(self.shortcut_row(cx, p, label, true).into_any_element());
-                }
-            }
-        }
-        if !fav_folders.is_empty() || !fav_files.is_empty() {
-            items.push(self.section_header(cx, "FAVORITES").into_any_element());
-            if shown("FAVORITES") {
-                for p in fav_folders {
-                    let label = display_name(&p);
-                    items.push(self.shortcut_row(cx, p, label, true).into_any_element());
-                }
-                for p in fav_files {
-                    let label = display_name(&p);
-                    items.push(self.shortcut_row(cx, p, label, false).into_any_element());
-                }
-            }
-        }
-        if !notes.is_empty() {
-            items.push(self.section_header(cx, "ICLOUD NOTES").into_any_element());
-            if shown("ICLOUD NOTES") {
-                for p in notes {
-                    let label = display_name(&p);
-                    items.push(self.shortcut_row(cx, p, label, true).into_any_element());
-                }
-            }
-        }
-        items
     }
 
 }
