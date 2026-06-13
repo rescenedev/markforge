@@ -455,6 +455,9 @@ impl MarkForge {
         self.set_doc_kind(DocKind::for_path(&path), cx);
         self.set_editor_text(text.clone(), window, cx);
         self.file_path = Some(path.clone());
+        // The open file becomes the selected tree row (so opening from
+        // favorites / recent / drag-drop highlights it too).
+        self.tree_cursor = Some(path.clone());
         self.dirty = false;
         self.imported = is_imported_doc(&path);
         self.start_watch(path.clone(), window, cx);
@@ -1995,7 +1998,6 @@ impl MarkForge {
                 .into_any_element()
         } else {
             let rows = self.file_tree.rows();
-            let current = self.file_path.clone();
             let cursor = self.tree_cursor.clone();
             let git = self.git.clone();
             // macOS system accent blue (selectedContentBackgroundColor), white on top.
@@ -2018,8 +2020,9 @@ impl MarkForge {
                 .children(rows.iter().cloned().map(move |row| {
                     let path = row.entry.path.clone();
                     let is_dir = row.entry.is_dir;
-                    let selected = !is_dir && current.as_deref() == Some(path.as_path());
-                    let at_cursor = cursor.as_deref() == Some(path.as_path());
+                    // One selection = the last clicked/opened row, file OR
+                    // folder. The cursor IS the selection.
+                    let selected = cursor.as_deref() == Some(path.as_path());
                     let id = SharedString::from(path.to_string_lossy().to_string());
 
                     // Git decorations (VSCode palette): badge + name tint.
@@ -2080,22 +2083,15 @@ impl MarkForge {
                         .gap_1()
                         .h(px(26.))
                         .rounded_md()
-                        // -2px when the cursor bar is drawn, so text doesn't shift.
-                        .pl(px(6. + row.depth as f32 * 14. - if at_cursor { 2. } else { 0. }))
+                        .pl(px(6. + row.depth as f32 * 14.))
                         .pr_2()
                         .text_sm()
                         .text_color(name_color)
                         .cursor_pointer()
-                        // The open document is the single selection (accent
-                        // fill). The keyboard cursor gets only a thin accent
-                        // bar so it never reads as a second selection.
+                        // Exactly one accent-filled row: the selected entry
+                        // (whatever you last clicked or opened, file or folder).
                         .when(selected, |this| this.bg(accent).font_medium())
-                        .when(!selected && at_cursor, |this| {
-                            this.border_l_2().border_color(accent)
-                        })
-                        .when(!selected && !at_cursor, |this| {
-                            this.hover(|this| this.bg(hover_bg))
-                        })
+                        .when(!selected, |this| this.hover(|this| this.bg(hover_bg)))
                         .child(lead)
                         .child(type_icon)
                         .child(
