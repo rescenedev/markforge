@@ -78,7 +78,8 @@ Settings live at `~/Library/Application Support/MarkForge/settings.json` —
 ⌘, opens that file *in MarkForge itself*; save (⌘S) and the changes apply
 instantly. Keys include `theme`, `zoom`, `body_font_size`, `preview_font`,
 `editor_font`, `syntax_theme`, `sidebar_open`, `preview_padding`,
-`backdrop_opacity` (0.2–1.0 window-gradient transparency), and
+`backdrop_opacity` (0.2–1.0 window-gradient transparency),
+`git_auto_commit` (commit on every save, note-vault style), and
 `sidebar_bg_dark`.
 
 ## Building

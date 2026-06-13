@@ -28,7 +28,7 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
     notification::NotificationType,
     resizable::{h_resizable, resizable_panel},
-    text::{TextViewStyle, markdown},
+    text::{TextView, TextViewStyle, markdown},
     v_flex,
 };
 
@@ -39,9 +39,9 @@ use crate::rem_scaled::RemScaled;
 use crate::settings::{Settings, ThemePref, parse_hex_color};
 use crate::{
     CheckoutBranch, CloseWindow, CommitAll, DiscardChanges, GitPull, GitPush, OpenFile,
-    OpenFolder, OpenRecent, Quit, Reload, Save, SetSyntaxTheme, SetTheme, ToggleDiff, ToggleEdit,
-    ToggleSettings, ToggleSidebar, ToggleTheme, TreeConfirm, TreeDown, TreeLeft, TreeRight,
-    TreeUp, ZoomIn, ZoomOut, ZoomReset,
+    OpenFolder, OpenRecent, OpenRevision, Quit, Reload, Save, SetSyntaxTheme, SetTheme,
+    ToggleDiff, ToggleEdit, ToggleRenderedDiff, ToggleSettings, ToggleSidebar, ToggleTheme,
+    TreeConfirm, TreeDown, TreeLeft, TreeRight, TreeUp, ZoomIn, ZoomOut, ZoomReset,
 };
 
 /// Bundled showcase document, displayed on first launch.
@@ -177,6 +177,10 @@ pub struct MarkForge {
     git_task: Option<Task<()>>,
     /// When set, the preview shows this `git diff` instead of the document.
     diff_preview: Option<SharedString>,
+    /// Set while viewing a historical revision of the file (read-only).
+    revision: Option<String>,
+    /// HEAD text for the side-by-side rendered Markdown comparison (⌘⇧D).
+    rendered_diff_old: Option<SharedString>,
     /// Cached sidebar shortcuts — recomputed on open/usage change, never per
     /// frame (sorting + stat-ing the usage table every frame caused jank).
     shortcut_places: Vec<(String, PathBuf)>,
@@ -262,6 +266,8 @@ impl MarkForge {
             git: std::rc::Rc::new(RepoStatus::default()),
             git_task: None,
             diff_preview: None,
+            revision: None,
+            rendered_diff_old: None,
             shortcut_places: Vec::new(),
             shortcut_fav_dirs: Vec::new(),
             shortcut_fav_files: Vec::new(),
@@ -444,6 +450,8 @@ impl MarkForge {
     ) {
         self.last_modified = modified;
         self.diff_preview = None;
+        self.revision = None;
+        self.rendered_diff_old = None;
         self.set_doc_kind(DocKind::for_path(&path), cx);
         self.set_editor_text(text.clone(), window, cx);
         self.file_path = Some(path.clone());
@@ -971,6 +979,104 @@ impl MarkForge {
         .detach();
     }
 
+    /// The current file's path relative to the repo root (for git plumbing).
+    fn repo_relative_path(&self) -> Option<(PathBuf, String)> {
+        let path = self.file_path.clone()?;
+        let root = self.git.root.clone()?;
+        let rel = path.strip_prefix(&root).ok()?.to_string_lossy().to_string();
+        Some((root, rel))
+    }
+
+    /// Open the current file as it was at `rev` — read-only: ⌘S offers a
+    /// Markdown copy, and ⌘R returns to the working-tree version.
+    fn on_open_revision(
+        &mut self,
+        action: &OpenRevision,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rev = action.0.clone();
+        let Some((root, rel)) = self.repo_relative_path() else { return };
+        let Some(path) = self.file_path.clone() else { return };
+
+        self.guard_unsaved(window, cx, move |_, window, cx| {
+            let show = {
+                let root = root.clone();
+                let rev = rev.clone();
+                cx.background_executor()
+                    .spawn(async move { crate::git::show_file_at(&root, &rev, &rel) })
+            };
+            cx.spawn_in(window, async move |this, cx| {
+                let result = show.await;
+                let _ = this.update_in(cx, |this, window, cx| match result {
+                    Ok(text) => {
+                        // Stop the live-reload watcher from clobbering history.
+                        this.watch_task = None;
+                        this.diff_preview = None;
+                        this.rendered_diff_old = None;
+                        this.set_doc_kind(DocKind::for_path(&path), cx);
+                        this.set_editor_text(text, window, cx);
+                        this.dirty = false;
+                        this.imported = true; // never save over the worktree file
+                        this.revision = Some(rev.clone());
+                        cx.notify();
+                    }
+                    Err(err) => window.push_notification(
+                        (NotificationType::Error, format!("git show failed: {err}")),
+                        cx,
+                    ),
+                });
+            })
+            .detach();
+        });
+    }
+
+    /// ⌘⇧D — side-by-side *rendered* Markdown comparison: HEAD on the left,
+    /// the working version on the right. Code documents fall back to ⌘D.
+    fn on_toggle_rendered_diff(
+        &mut self,
+        _: &ToggleRenderedDiff,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.rendered_diff_old.take().is_some() {
+            cx.notify();
+            return;
+        }
+        if !matches!(self.doc_kind, DocKind::Markdown) {
+            self.on_toggle_diff(&ToggleDiff, window, cx);
+            return;
+        }
+        let Some((root, rel)) = self.repo_relative_path() else {
+            window.push_notification((NotificationType::Info, "Not inside a git repository"), cx);
+            return;
+        };
+
+        let show = cx
+            .background_executor()
+            .spawn(async move { crate::git::show_file_at(&root, "HEAD", &rel) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = show.await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(old) if old == this.text(cx).as_ref() => {
+                    window.push_notification(
+                        (NotificationType::Info, "No changes against HEAD"),
+                        cx,
+                    );
+                }
+                Ok(old) => {
+                    this.rendered_diff_old = Some(old.into());
+                    cx.notify();
+                }
+                Err(err) => window.push_notification(
+                    (NotificationType::Error, format!("git show failed: {err}")),
+                    cx,
+                ),
+            });
+        })
+        .detach();
+    }
+
     /// Poll `git status` for `dir` on the background executor, updating the
     /// snapshot whenever it changes. Replaces any previous poller.
     fn start_git_poll(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
@@ -1211,6 +1317,7 @@ impl MarkForge {
     }
 
     fn on_toggle_edit(&mut self, _: &ToggleEdit, window: &mut Window, cx: &mut Context<Self>) {
+        self.rendered_diff_old = None; // the editor replaces the comparison
         self.editing = !self.editing;
         if self.editing {
             self.input_state.focus_handle(cx).focus(window, cx);
@@ -1286,6 +1393,8 @@ impl MarkForge {
                 self.dirty = false;
                 if Settings::is_settings_path(&path) {
                     self.apply_settings_from_disk(window, cx);
+                } else if cx.global::<Settings>().git_auto_commit {
+                    self.auto_commit(&path, cx);
                 }
                 cx.notify();
                 true
@@ -1295,6 +1404,28 @@ impl MarkForge {
                 false
             }
         }
+    }
+
+    /// Best-effort note-vault auto-commit after a save (git_auto_commit).
+    fn auto_commit(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let Some(dir) = self.git_dir() else { return };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let commit = {
+            let dir = dir.clone();
+            cx.background_executor().spawn(async move {
+                crate::git::commit_all(&dir, &format!("markforge: update {name}"))
+            })
+        };
+        cx.spawn(async move |this, cx| {
+            // Errors (e.g. nothing to commit) are intentionally silent.
+            if commit.await.is_ok() {
+                let _ = this.update(cx, |this, cx| this.start_git_poll(dir.clone(), cx));
+            }
+        })
+        .detach();
     }
 
     fn on_close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
@@ -1457,7 +1588,9 @@ impl MarkForge {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Untitled".to_string());
 
-        if self.dirty {
+        if let Some(rev) = &self.revision {
+            format!("{name} @ {rev}").into()
+        } else if self.dirty {
             format!("{name} •").into()
         } else {
             name.into()
@@ -1612,6 +1745,91 @@ impl MarkForge {
                     ),
                 )
                 .child(resizable_panel().child(editor)),
+        )
+    }
+
+    /// A standalone rendered-Markdown pane (used by the ⌘⇧D comparison).
+    fn markdown_pane(
+        &self,
+        id: &'static str,
+        text: SharedString,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let settings = cx.global::<Settings>();
+        let body = settings.body_font_size.max(1.0) * self.zoom;
+        let preview_font = settings.preview_font.clone();
+        let pad = px(settings.preview_padding.clamp(0.0, 64.0));
+
+        let mut code_block = StyleRefinement::default();
+        code_block.text.font_size = Some((theme.mono_font_size * self.zoom).into());
+        let style = TextViewStyle {
+            heading_base_font_size: px(body),
+            highlight_theme: theme.highlight_theme.clone(),
+            is_dark: theme.mode.is_dark(),
+            code_block,
+            ..Default::default()
+        };
+
+        TextView::markdown(id, text)
+            .style(style)
+            .scrollable(true)
+            .selectable(true)
+            .size_full()
+            .text_size(px(body))
+            .p(pad)
+            .when(!preview_font.is_empty(), |this| this.font_family(preview_font))
+    }
+
+    /// Side-by-side rendered comparison: HEAD | working copy.
+    fn render_rendered_diff(&self, old: SharedString, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let pane_label = |text: String| {
+            div()
+                .flex_none()
+                .w_full()
+                .px_3()
+                .py_1()
+                .text_xs()
+                .font_semibold()
+                .text_color(theme.muted_foreground)
+                .border_b_1()
+                .border_color(theme.border)
+                .child(text)
+        };
+
+        div().size_full().child(
+            h_resizable("rendered-diff")
+                .child(
+                    resizable_panel().child(
+                        v_flex()
+                            .size_full()
+                            .child(pane_label("HEAD".to_string()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h(px(0.))
+                                    .child(self.markdown_pane("rendered-old", old, cx)),
+                            ),
+                    ),
+                )
+                .child(
+                    resizable_panel().child(
+                        v_flex()
+                            .size_full()
+                            .border_l_1()
+                            .border_color(theme.border)
+                            .child(pane_label(format!(
+                                "Working{}",
+                                if self.dirty { " •" } else { "" }
+                            )))
+                            .child(div().flex_1().min_h(px(0.)).child(self.markdown_pane(
+                                "rendered-new",
+                                self.text(cx),
+                                cx,
+                            ))),
+                    ),
+                ),
         )
     }
 
@@ -1935,6 +2153,39 @@ impl MarkForge {
                         .child(
                             h_flex()
                                 .gap_0p5()
+                                .when_some(self.repo_relative_path(), |this, (root, rel)| {
+                                    this.child(
+                                        Button::new("git-history")
+                                            .label("🕘")
+                                            .ghost()
+                                            .xsmall()
+                                            .tooltip("File history — open a previous version")
+                                            .dropdown_menu(move |mut menu, _, _| {
+                                                match crate::git::file_log(&root, &rel, 20) {
+                                                    Ok(entries) if !entries.is_empty() => {
+                                                        for e in entries {
+                                                            let mut subject =
+                                                                e.subject.chars().take(36).collect::<String>();
+                                                            if subject.len() < e.subject.len() {
+                                                                subject.push('…');
+                                                            }
+                                                            menu = menu.menu(
+                                                                format!(
+                                                                    "{} · {} · {}",
+                                                                    e.date, e.hash, subject
+                                                                ),
+                                                                Box::new(OpenRevision(
+                                                                    e.hash.clone(),
+                                                                )),
+                                                            );
+                                                        }
+                                                    }
+                                                    _ => menu = menu.label("No history"),
+                                                }
+                                                menu
+                                            }),
+                                    )
+                                })
                                 .child(
                                     Button::new("git-pull")
                                         .label("↓")
@@ -2148,7 +2399,9 @@ impl Render for MarkForge {
             )
         };
 
-        let main_body = if self.editing {
+        let main_body = if let Some(old) = self.rendered_diff_old.clone() {
+            self.render_rendered_diff(old, cx).into_any_element()
+        } else if self.editing {
             self.render_split(cx).into_any_element()
         } else {
             self.render_preview(cx).into_any_element()
@@ -2195,6 +2448,8 @@ impl Render for MarkForge {
             .on_action(cx.listener(Self::on_tree_confirm))
             .on_action(cx.listener(Self::on_checkout_branch))
             .on_action(cx.listener(Self::on_toggle_diff))
+            .on_action(cx.listener(Self::on_toggle_rendered_diff))
+            .on_action(cx.listener(Self::on_open_revision))
             .on_action(cx.listener(Self::on_commit_all))
             .on_action(cx.listener(Self::on_git_push))
             .on_action(cx.listener(Self::on_git_pull))

@@ -47,6 +47,8 @@ pub struct Settings {
     /// Opacity of the window backdrop gradient (0.2 transparent – 1.0 solid).
     /// Sidebar and title bar derive slightly more transparent values from it.
     pub backdrop_opacity: f32,
+    /// Auto-commit the file to its repository on every save (note-vault style).
+    pub git_auto_commit: bool,
     /// Sidebar background in dark mode (hex, e.g. "#262B3C"); empty = default.
     pub sidebar_bg_dark: String,
     pub recent: Vec<PathBuf>,
@@ -66,6 +68,7 @@ impl Default for Settings {
             sidebar_open: true,
             preview_padding: 8.0,
             backdrop_opacity: 0.68,
+            git_auto_commit: false,
             sidebar_bg_dark: String::new(),
             recent: Vec::new(),
             usage: HashMap::new(),

@@ -48,6 +48,7 @@ actions!(
         TreeRight,
         TreeConfirm,
         ToggleDiff,
+        ToggleRenderedDiff,
         CommitAll,
         GitPush,
         GitPull,
@@ -76,6 +77,11 @@ pub struct SetSyntaxTheme(pub String);
 #[derive(Clone, PartialEq, Eq, Action, Deserialize)]
 #[action(namespace = markforge, no_json)]
 pub struct CheckoutBranch(pub String);
+
+/// Open the current file as it was at the given revision (read-only).
+#[derive(Clone, PartialEq, Eq, Action, Deserialize)]
+#[action(namespace = markforge, no_json)]
+pub struct OpenRevision(pub String);
 
 fn main() {
     let application = gpui_platform::application().with_assets(Assets);
@@ -124,6 +130,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-,", ToggleSettings, None),
         KeyBinding::new("cmd-shift-l", ToggleTheme, None),
         KeyBinding::new("cmd-d", ToggleDiff, None),
+        KeyBinding::new("cmd-shift-d", ToggleRenderedDiff, None),
         // Zoom. Accept both the bare `=`/`+` keys so ⌘+ works with or without Shift.
         KeyBinding::new("cmd-=", ZoomIn, None),
         KeyBinding::new("cmd-+", ZoomIn, None),
@@ -206,6 +213,7 @@ pub fn set_menus(cx: &mut App) {
             name: "Git".into(),
             items: vec![
                 MenuItem::action("Show Diff", ToggleDiff),
+                MenuItem::action("Compare Rendered with HEAD", ToggleRenderedDiff),
                 MenuItem::action("Discard File Changes…", DiscardChanges),
                 MenuItem::separator(),
                 MenuItem::action("Push", GitPush),

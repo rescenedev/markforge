@@ -69,6 +69,45 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// One entry of a file's commit history.
+#[derive(Clone)]
+pub struct LogEntry {
+    pub hash: String,
+    pub date: String,
+    pub subject: String,
+}
+
+/// Recent commits touching `file` (newest first).
+pub fn file_log(dir: &Path, file: &str, limit: usize) -> Result<Vec<LogEntry>, String> {
+    let out = git(
+        dir,
+        &[
+            "log",
+            &format!("-n{limit}"),
+            "--format=%h%x09%ad%x09%s",
+            "--date=short",
+            "--",
+            file,
+        ],
+    )?;
+    Ok(out
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, '\t');
+            Some(LogEntry {
+                hash: parts.next()?.to_string(),
+                date: parts.next()?.to_string(),
+                subject: parts.next().unwrap_or("").to_string(),
+            })
+        })
+        .collect())
+}
+
+/// Contents of `rel_path` at `rev` (e.g. "HEAD" or a short hash).
+pub fn show_file_at(dir: &Path, rev: &str, rel_path: &str) -> Result<String, String> {
+    git(dir, &["show", &format!("{rev}:{rel_path}")])
+}
+
 /// Stage everything and commit with `message`. Returns git's summary line.
 pub fn commit_all(dir: &Path, message: &str) -> Result<String, String> {
     git(dir, &["add", "-A"])?;
