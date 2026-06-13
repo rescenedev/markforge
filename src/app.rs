@@ -51,6 +51,16 @@ const ZOOM_STEP: f32 = 0.1;
 const ZOOM_MIN: f32 = 0.6;
 const ZOOM_MAX: f32 = 2.6;
 
+/// Neutral gray mat painted behind rendered PDF pages, so a PDF's white pages
+/// read like sheets on a document-viewer desk instead of stark white islands
+/// floating on the dark app backdrop.
+const PDF_MAT: gpui::Rgba = gpui::Rgba {
+    r: 0.231,
+    g: 0.231,
+    b: 0.243,
+    a: 1.0,
+};
+
 /// How long to wait after the last keystroke before re-parsing the preview.
 const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(120);
 
@@ -1602,6 +1612,9 @@ impl MarkForge {
         let preview_font = settings.preview_font.clone();
         let pad = px(settings.preview_padding.clamp(0.0, 64.0));
         let is_code_doc = self.diff_preview.is_some() || !matches!(self.doc_kind, DocKind::Markdown);
+        // A rendered PDF is page images: show them edge-to-edge with only a
+        // thin gap, so the pages fill the view instead of floating in margins.
+        let is_pdf = self.is_pdf();
 
         // Scale fenced code blocks too (they otherwise use the fixed mono size).
         let mut code_block = StyleRefinement::default();
@@ -1620,6 +1633,11 @@ impl MarkForge {
             highlight_theme: theme.highlight_theme.clone(),
             is_dark: theme.mode.is_dark(),
             code_block,
+            paragraph_gap: if is_pdf {
+                gpui::rems(0.25)
+            } else {
+                TextViewStyle::default().paragraph_gap
+            },
             ..Default::default()
         };
 
@@ -1633,7 +1651,7 @@ impl MarkForge {
             .selectable(true)
             .size_full()
             .text_size(px(body))
-            .when(!is_code_doc, |this| this.p(pad))
+            .when(!is_code_doc && !is_pdf, |this| this.p(pad))
             .when(!preview_font.is_empty(), |this| this.font_family(preview_font))
     }
 
@@ -1652,6 +1670,15 @@ impl MarkForge {
         } else {
             name.into()
         }
+    }
+
+    /// Whether the open document is a PDF (rendered as page images).
+    fn is_pdf(&self) -> bool {
+        self.file_path
+            .as_ref()
+            .and_then(|p| p.extension())
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
     }
 
     /// Folder the open document lives in (immediate parent name), for the
@@ -1770,9 +1797,15 @@ impl MarkForge {
     }
 
     /// Full-width rendered Markdown. No background of its own — the root
-    /// view's gradient backdrop shows through.
+    /// view's gradient backdrop shows through. Exception: a PDF's white pages
+    /// get a neutral gray mat behind them (like Preview.app) so they don't read
+    /// as stark white islands on the dark backdrop.
     fn render_preview(&self, cx: &Context<Self>) -> impl IntoElement {
-        div().id("doc").size_full().child(self.styled_markdown(cx))
+        div()
+            .id("doc")
+            .size_full()
+            .when(self.is_pdf(), |this| this.bg(PDF_MAT))
+            .child(self.styled_markdown(cx))
     }
 
     /// Split view: live preview on the left, source editor on the right.
@@ -1821,7 +1854,11 @@ impl MarkForge {
             h_resizable("split")
                 .child(
                     resizable_panel().child(
-                        div().id("preview").size_full().child(self.styled_markdown(cx)),
+                        div()
+                            .id("preview")
+                            .size_full()
+                            .when(self.is_pdf(), |this| this.bg(PDF_MAT))
+                            .child(self.styled_markdown(cx)),
                     ),
                 )
                 .child(resizable_panel().child(editor)),
