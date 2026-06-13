@@ -120,6 +120,19 @@ pub fn commit_all(dir: &Path, message: &str) -> Result<String, String> {
     })
 }
 
+/// Status for the first candidate directory that is inside a git repo.
+/// Lets a click target take priority while gracefully falling back (e.g. a
+/// non-repo folder keeps showing the open document's repository).
+pub fn repo_status_first(candidates: &[PathBuf]) -> RepoStatus {
+    for dir in candidates {
+        let status = repo_status(dir);
+        if status.root.is_some() {
+            return status;
+        }
+    }
+    RepoStatus::default()
+}
+
 /// Full status snapshot for the repository containing `dir`.
 pub fn repo_status(dir: &Path) -> RepoStatus {
     let Ok(root) = git(dir, &["rev-parse", "--show-toplevel"]) else {

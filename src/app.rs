@@ -471,7 +471,9 @@ impl MarkForge {
             }
         }
 
-        self.refresh_git_context(cx);
+        if let Some(parent) = path.parent() {
+            self.start_git_poll(parent.to_path_buf(), cx);
+        }
 
         let settings = cx.global_mut::<Settings>();
         settings.push_recent(path.clone());
@@ -713,7 +715,7 @@ impl MarkForge {
         // New root: stale cache entries are useless now; preload the new dir.
         self.doc_cache.clear();
         self.preload_dir(path.clone(), cx);
-        self.refresh_git_context(cx);
+        self.start_git_poll(path.clone(), cx);
         let settings = cx.global_mut::<Settings>();
         settings.push_recent(path.clone());
         settings.bump_usage(&path);
@@ -1072,31 +1074,26 @@ impl MarkForge {
         .detach();
     }
 
-    /// Point the git poller at the right directory: the open document's repo
-    /// takes priority (so the branch chip / commit panel keep showing it even
-    /// while you browse an unrelated folder like Home), falling back to the
-    /// tree root when no document is open.
-    fn refresh_git_context(&mut self, cx: &mut Context<Self>) {
-        let dir = self
-            .file_path
-            .as_ref()
-            .and_then(|p| p.parent())
-            .map(Path::to_path_buf)
-            .or_else(|| self.file_tree.root().map(Path::to_path_buf));
-        if let Some(dir) = dir {
-            self.start_git_poll(dir, cx);
+    /// Point the git poller at `primary` (the folder/file just interacted
+    /// with). It takes priority, then falls back to the open document's repo,
+    /// then the tree root — so clicking a directory shows *its* repo, but
+    /// browsing a non-repo folder doesn't blank the panel while a repo file is
+    /// open. Replaces any previous poller.
+    fn start_git_poll(&mut self, primary: PathBuf, cx: &mut Context<Self>) {
+        let mut candidates = vec![primary];
+        if let Some(parent) = self.file_path.as_ref().and_then(|p| p.parent()) {
+            candidates.push(parent.to_path_buf());
         }
-    }
+        if let Some(root) = self.file_tree.root() {
+            candidates.push(root.to_path_buf());
+        }
 
-    /// Poll `git status` for `dir` on the background executor, updating the
-    /// snapshot whenever it changes. Replaces any previous poller.
-    fn start_git_poll(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
         let task = cx.spawn(async move |this, cx| {
             loop {
                 let status = {
-                    let dir = dir.clone();
+                    let candidates = candidates.clone();
                     cx.background_executor()
-                        .spawn(async move { crate::git::repo_status(&dir) })
+                        .spawn(async move { crate::git::repo_status_first(&candidates) })
                         .await
                 };
                 let alive = this.update(cx, |this, cx| {
@@ -1201,6 +1198,9 @@ impl MarkForge {
     ) {
         self.tree_cursor = Some(path.clone());
         if is_dir {
+            // Switch the git context to the clicked folder's repo (falls back
+            // to the open document's repo when the folder isn't tracked).
+            self.start_git_poll(path.clone(), cx);
             // Expanding a folder warms the cache for its documents.
             if self.file_tree.toggle(&path) {
                 self.preload_dir(path, cx);
@@ -2004,7 +2004,9 @@ impl MarkForge {
             // A blue tint for hover — clearly visible, ties to the selection.
             let hover_bg = gpui::hsla(0.586, 0.92, 0.52, 0.24);
             // The keyboard cursor: stronger than hover, weaker than selection.
-            let cursor_bg = gpui::hsla(0.586, 0.92, 0.52, 0.38);
+            // Subordinate to the open-document accent: a gentle keyboard-focus
+            // tint, not a second "selection".
+            let cursor_bg = gpui::hsla(0.586, 0.30, 0.50, 0.20);
             v_flex()
                 .id("tree-scroll")
                 .flex_1()
@@ -2258,11 +2260,11 @@ impl MarkForge {
         let accent = gpui::hsla(0.586, 0.92, 0.52, 1.0);
         let on_accent = gpui::hsla(0., 0., 1., 1.);
         let hover_bg = gpui::hsla(0.586, 0.92, 0.52, 0.24);
-        let selected = if is_dir {
-            self.file_tree.root() == Some(path.as_path())
-        } else {
-            self.file_path.as_deref() == Some(path.as_path())
-        };
+        let current_bg = gpui::hsla(0.586, 0.30, 0.50, 0.18);
+        // The strong accent marks the one document you're viewing. The current
+        // tree-root folder only gets a faint hint, so highlights don't compete.
+        let is_open_doc = !is_dir && self.file_path.as_deref() == Some(path.as_path());
+        let is_current_root = is_dir && self.file_tree.root() == Some(path.as_path());
         let id = SharedString::from(format!("shortcut-{}", path.to_string_lossy()));
 
         div()
@@ -2276,13 +2278,16 @@ impl MarkForge {
             .pr_2()
             .text_sm()
             .cursor_pointer()
-            .text_color(if selected { on_accent } else { theme.sidebar_foreground })
-            .when(selected, |this| this.bg(accent).font_medium())
-            .when(!selected, |this| this.hover(|this| this.bg(hover_bg)))
+            .text_color(if is_open_doc { on_accent } else { theme.sidebar_foreground })
+            .when(is_open_doc, |this| this.bg(accent).font_medium())
+            .when(is_current_root, |this| this.bg(current_bg).font_medium())
+            .when(!is_open_doc && !is_current_root, |this| {
+                this.hover(|this| this.bg(hover_bg))
+            })
             .child(
                 Icon::new(if is_dir { IconName::Folder } else { IconName::File })
                     .size(px(14.))
-                    .text_color(if selected { on_accent } else { theme.muted_foreground }),
+                    .text_color(if is_open_doc { on_accent } else { theme.muted_foreground }),
             )
             .child(div().flex_1().min_w(px(0.)).truncate().child(label))
             .on_click(move |_, window, cx| {
