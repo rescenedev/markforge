@@ -2006,7 +2006,6 @@ impl MarkForge {
             // The keyboard cursor: stronger than hover, weaker than selection.
             // Subordinate to the open-document accent: a gentle keyboard-focus
             // tint, not a second "selection".
-            let cursor_bg = gpui::hsla(0.586, 0.30, 0.50, 0.20);
             v_flex()
                 .id("tree-scroll")
                 .flex_1()
@@ -2081,14 +2080,22 @@ impl MarkForge {
                         .gap_1()
                         .h(px(26.))
                         .rounded_md()
-                        .pl(px(6. + row.depth as f32 * 14.))
+                        // -2px when the cursor bar is drawn, so text doesn't shift.
+                        .pl(px(6. + row.depth as f32 * 14. - if at_cursor { 2. } else { 0. }))
                         .pr_2()
                         .text_sm()
                         .text_color(name_color)
                         .cursor_pointer()
+                        // The open document is the single selection (accent
+                        // fill). The keyboard cursor gets only a thin accent
+                        // bar so it never reads as a second selection.
                         .when(selected, |this| this.bg(accent).font_medium())
-                        .when(!selected && at_cursor, |this| this.bg(cursor_bg))
-                        .when(!selected, |this| this.hover(|this| this.bg(hover_bg)))
+                        .when(!selected && at_cursor, |this| {
+                            this.border_l_2().border_color(accent)
+                        })
+                        .when(!selected && !at_cursor, |this| {
+                            this.hover(|this| this.bg(hover_bg))
+                        })
                         .child(lead)
                         .child(type_icon)
                         .child(
@@ -2257,14 +2264,10 @@ impl MarkForge {
     ) -> impl IntoElement {
         let theme = cx.theme();
         let weak = cx.entity().downgrade();
-        let accent = gpui::hsla(0.586, 0.92, 0.52, 1.0);
-        let on_accent = gpui::hsla(0., 0., 1., 1.);
         let hover_bg = gpui::hsla(0.586, 0.92, 0.52, 0.24);
-        let current_bg = gpui::hsla(0.586, 0.30, 0.50, 0.18);
-        // The strong accent marks the one document you're viewing. The current
-        // tree-root folder only gets a faint hint, so highlights don't compete.
-        let is_open_doc = !is_dir && self.file_path.as_deref() == Some(path.as_path());
-        let is_current_root = is_dir && self.file_tree.root() == Some(path.as_path());
+        // Shortcuts are quick-launch buttons, never a persistent selection:
+        // the *only* highlighted row in the sidebar is the open document, in
+        // the tree below. Shortcuts just get a transient hover.
         let id = SharedString::from(format!("shortcut-{}", path.to_string_lossy()));
 
         div()
@@ -2278,16 +2281,12 @@ impl MarkForge {
             .pr_2()
             .text_sm()
             .cursor_pointer()
-            .text_color(if is_open_doc { on_accent } else { theme.sidebar_foreground })
-            .when(is_open_doc, |this| this.bg(accent).font_medium())
-            .when(is_current_root, |this| this.bg(current_bg).font_medium())
-            .when(!is_open_doc && !is_current_root, |this| {
-                this.hover(|this| this.bg(hover_bg))
-            })
+            .text_color(theme.sidebar_foreground)
+            .hover(|this| this.bg(hover_bg))
             .child(
                 Icon::new(if is_dir { IconName::Folder } else { IconName::File })
                     .size(px(14.))
-                    .text_color(if is_open_doc { on_accent } else { theme.muted_foreground }),
+                    .text_color(theme.muted_foreground),
             )
             .child(div().flex_1().min_w(px(0.)).truncate().child(label))
             .on_click(move |_, window, cx| {
