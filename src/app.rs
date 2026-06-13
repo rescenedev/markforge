@@ -1900,6 +1900,60 @@ impl MarkForge {
     }
 
     /// VSCode-style file-explorer sidebar.
+    /// Ancestor folder names for the first visible tree row, so a pinned
+    /// header can show "where am I" when scrolled deep into a folder.
+    /// Empty near the top (nothing scrolled off).
+    fn tree_sticky_chain(&self, rows: &[crate::file_tree::Row]) -> Vec<String> {
+        const ROW_H: f32 = 32.0;
+        let offset_y: f32 = self.tree_scroll.offset().y.into();
+        if offset_y >= -ROW_H || rows.is_empty() {
+            return Vec::new();
+        }
+        let first = (((-offset_y) / ROW_H).floor() as usize).min(rows.len() - 1);
+        let depth = rows[first].depth;
+        if depth == 0 {
+            return Vec::new();
+        }
+        // Nearest preceding row at each shallower depth is the ancestor there.
+        let mut chain: Vec<Option<String>> = vec![None; depth];
+        for r in rows[..=first].iter().rev() {
+            if r.depth < depth && chain[r.depth].is_none() {
+                chain[r.depth] = Some(r.entry.name.clone());
+                if chain.iter().all(Option::is_some) {
+                    break;
+                }
+            }
+        }
+        chain.into_iter().flatten().collect()
+    }
+
+    /// Pinned breadcrumb header drawn over the top of the scrolled tree.
+    fn render_tree_sticky(&self, cx: &Context<Self>, chain: Vec<String>) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .flex()
+            .items_center()
+            .gap_1()
+            .h(px(26.))
+            .px(px(8.))
+            .bg(theme.sidebar)
+            .border_b_1()
+            .border_color(theme.sidebar_border)
+            .text_xs()
+            .font_semibold()
+            .text_color(theme.muted_foreground)
+            .child(
+                Icon::new(IconName::Folder)
+                    .size(px(13.))
+                    .text_color(theme.muted_foreground),
+            )
+            .child(div().flex_1().min_w(px(0.)).truncate().child(chain.join("  ›  ")))
+    }
+
     fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let weak = cx.entity().downgrade();
@@ -2050,6 +2104,7 @@ impl MarkForge {
                 .into_any_element()
         } else {
             let rows = self.file_tree.rows();
+            let sticky = self.tree_sticky_chain(&rows);
             let cursor = self.tree_cursor.clone();
             let git = self.git.clone();
             // macOS system accent blue (selectedContentBackgroundColor), white on top.
@@ -2060,9 +2115,11 @@ impl MarkForge {
             // The keyboard cursor: stronger than hover, weaker than selection.
             // Subordinate to the open-document accent: a gentle keyboard-focus
             // tint, not a second "selection".
-            v_flex()
+            let tree = v_flex()
                 .id("tree-scroll")
-                .flex_1()
+                .size_full()
+                // Re-render on scroll so the sticky folder header stays current.
+                .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
                 .w_full()
                 .min_h(px(0.))
                 .py_1()
@@ -2180,7 +2237,17 @@ impl MarkForge {
                                 this.on_tree_entry(path.clone(), is_dir, window, cx)
                             });
                         })
-                }))
+                }));
+
+            div()
+                .relative()
+                .flex_1()
+                .w_full()
+                .min_h(px(0.))
+                .child(tree)
+                .when(!sticky.is_empty(), |this| {
+                    this.child(self.render_tree_sticky(cx, sticky))
+                })
                 .into_any_element()
         };
 

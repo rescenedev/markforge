@@ -45,10 +45,43 @@ pub fn import_dir() -> Option<PathBuf> {
     )
 }
 
+/// Clear name for Apple Notes' default folder (where un-filed notes collect).
+const INBOX_DIR: &str = "_Inbox";
+
+/// AppleScript: names of each account's default folder (the "no folder"
+/// bucket), one per line. These are remapped to `_Inbox` on export.
+const DEFAULT_FOLDERS_SCRIPT: &str = r#"tell application "Notes"
+  set out to ""
+  repeat with a in accounts
+    try
+      set out to out & (name of default folder of a) & linefeed
+    end try
+  end repeat
+  return out
+end tell"#;
+
+fn default_folder_names() -> HashSet<String> {
+    Command::new("osascript")
+        .arg("-e")
+        .arg(DEFAULT_FOLDERS_SCRIPT)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Export every note to `dest` as Markdown. Returns the number written.
 /// Safe to run on the background executor.
 pub fn export(dest: &Path) -> io::Result<usize> {
     let dump = std::env::temp_dir().join("markforge-notes-dump.txt");
+    let defaults = default_folder_names();
     run_script(&dump)?;
 
     let converter = htmd::HtmlToMarkdown::new();
@@ -61,7 +94,13 @@ pub fn export(dest: &Path) -> io::Result<usize> {
         let Some((folder, title, body)) = split3(&record) else {
             continue;
         };
-        let dir = dest.join(sanitize(&folder));
+        // Apple's default folder (un-filed notes) gets a clear, top-sorted name.
+        let dir_name = if defaults.contains(folder.trim()) {
+            INBOX_DIR.to_string()
+        } else {
+            sanitize(&folder)
+        };
+        let dir = dest.join(dir_name);
         std::fs::create_dir_all(&dir)?;
 
         let stem = {
