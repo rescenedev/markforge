@@ -177,6 +177,11 @@ pub struct MarkForge {
     git_task: Option<Task<()>>,
     /// When set, the preview shows this `git diff` instead of the document.
     diff_preview: Option<SharedString>,
+    /// Cached sidebar shortcuts — recomputed on open/usage change, never per
+    /// frame (sorting + stat-ing the usage table every frame caused jank).
+    shortcut_places: Vec<(String, PathBuf)>,
+    shortcut_fav_dirs: Vec<PathBuf>,
+    shortcut_fav_files: Vec<PathBuf>,
     /// Commit-message field at the bottom of the sidebar.
     commit_input: gpui::Entity<InputState>,
     _subscriptions: Vec<Subscription>,
@@ -257,9 +262,13 @@ impl MarkForge {
             git: std::rc::Rc::new(RepoStatus::default()),
             git_task: None,
             diff_preview: None,
+            shortcut_places: Vec::new(),
+            shortcut_fav_dirs: Vec::new(),
+            shortcut_fav_files: Vec::new(),
             commit_input,
             _subscriptions: vec![input_sub, commit_sub, appearance_sub],
         };
+        this.refresh_shortcuts(cx);
 
         match initial {
             // A directory argument opens the file-explorer sidebar.
@@ -461,7 +470,10 @@ impl MarkForge {
             self.start_git_poll(parent.to_path_buf(), cx);
         }
 
-        cx.global_mut::<Settings>().push_recent(path);
+        let settings = cx.global_mut::<Settings>();
+        settings.push_recent(path.clone());
+        settings.bump_usage(&path);
+        self.refresh_shortcuts(cx);
         save_settings(cx);
         crate::set_menus(cx);
         cx.notify();
@@ -676,6 +688,20 @@ impl MarkForge {
         .detach();
     }
 
+    /// Open `path` as the tree root — or, when it already is, reset the view
+    /// (collapse + scroll to top) so the click always responds visibly.
+    fn open_or_reveal_folder(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.file_tree.root() == Some(path.as_path()) {
+            self.file_tree.collapse_all();
+            self.tree_cursor = None;
+            self.tree_scroll.scroll_to_item(0);
+            self.sidebar_open = true;
+            cx.notify();
+        } else {
+            self.open_folder(path, cx);
+        }
+    }
+
     /// Open `path` in the sidebar file tree and record it as recent.
     fn open_folder(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.file_tree.open(path.clone());
@@ -685,7 +711,10 @@ impl MarkForge {
         self.doc_cache.clear();
         self.preload_dir(path.clone(), cx);
         self.start_git_poll(path.clone(), cx);
-        cx.global_mut::<Settings>().push_recent(path);
+        let settings = cx.global_mut::<Settings>();
+        settings.push_recent(path.clone());
+        settings.bump_usage(&path);
+        self.refresh_shortcuts(cx);
         save_settings(cx);
         crate::set_menus(cx);
         cx.notify();
@@ -1324,6 +1353,7 @@ impl MarkForge {
         self.sidebar_open = settings.sidebar_open;
         apply_theme(settings.theme, window, cx);
         apply_syntax_theme(cx);
+        self.refresh_shortcuts(cx);
         crate::set_menus(cx);
         cx.notify();
     }
@@ -1711,7 +1741,9 @@ impl MarkForge {
 
         let body = if !self.file_tree.is_open() {
             v_flex()
-                .size_full()
+                .flex_1()
+                .w_full()
+                .min_h(px(0.))
                 .items_center()
                 .justify_center()
                 .gap_3()
@@ -1746,13 +1778,14 @@ impl MarkForge {
             let cursor_bg = gpui::hsla(0.586, 0.92, 0.52, 0.38);
             v_flex()
                 .id("tree-scroll")
-                .size_full()
+                .flex_1()
+                .w_full()
                 .min_h(px(0.))
                 .py_1()
                 .px_1p5()
                 .overflow_y_scroll()
                 .track_scroll(&self.tree_scroll)
-                .children(rows.into_iter().map(move |row| {
+                .children(rows.iter().cloned().map(move |row| {
                     let path = row.entry.path.clone();
                     let is_dir = row.entry.is_dir;
                     let selected = !is_dir && current.as_deref() == Some(path.as_path());
@@ -1945,8 +1978,143 @@ impl MarkForge {
             .border_r_1()
             .border_color(theme.sidebar_border)
             .child(header)
+            .children(self.render_shortcuts(cx))
             .child(body)
             .children(commit_panel)
+    }
+
+    /// One clickable shortcut row (used by PLACES and FAVORITES).
+    fn shortcut_row(
+        &self,
+        cx: &Context<Self>,
+        path: PathBuf,
+        label: String,
+        is_dir: bool,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let weak = cx.entity().downgrade();
+        let accent = gpui::hsla(0.586, 0.92, 0.52, 1.0);
+        let on_accent = gpui::hsla(0., 0., 1., 1.);
+        let hover_bg = gpui::hsla(0.586, 0.92, 0.52, 0.24);
+        let selected = if is_dir {
+            self.file_tree.root() == Some(path.as_path())
+        } else {
+            self.file_path.as_deref() == Some(path.as_path())
+        };
+        let id = SharedString::from(format!("shortcut-{}", path.to_string_lossy()));
+
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .gap_1()
+            .h(px(24.))
+            .rounded_md()
+            .pl_2()
+            .pr_2()
+            .text_sm()
+            .cursor_pointer()
+            .text_color(if selected { on_accent } else { theme.sidebar_foreground })
+            .when(selected, |this| this.bg(accent).font_medium())
+            .when(!selected, |this| this.hover(|this| this.bg(hover_bg)))
+            .child(
+                Icon::new(if is_dir { IconName::Folder } else { IconName::File })
+                    .size(px(14.))
+                    .text_color(if selected { on_accent } else { theme.muted_foreground }),
+            )
+            .child(div().flex_1().min_w(px(0.)).truncate().child(label))
+            .on_click(move |_, window, cx| {
+                let path = path.clone();
+                let _ = weak.update(cx, |this, cx| {
+                    if is_dir {
+                        this.open_or_reveal_folder(path, cx);
+                    } else {
+                        this.guard_unsaved(window, cx, move |this, window, cx| {
+                            this.load_path(path, window, cx)
+                        });
+                    }
+                });
+            })
+    }
+
+    /// Recompute the cached PLACES / FAVORITES shortcut lists. Called when
+    /// usage changes — never during render (it sorts and stats paths).
+    fn refresh_shortcuts(&mut self, cx: &App) {
+        let mut places: Vec<(String, PathBuf)> = Vec::new();
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            for (label, p) in [
+                ("Home", home.clone()),
+                ("Desktop", home.join("Desktop")),
+                ("Downloads", home.join("Downloads")),
+            ] {
+                if p.is_dir() {
+                    places.push((label.to_string(), p));
+                }
+            }
+        }
+        let settings = cx.global::<Settings>();
+        self.shortcut_fav_dirs = settings.top_usage(
+            |p| p.is_dir() && !places.iter().any(|(_, place)| place == p),
+            3,
+        );
+        self.shortcut_fav_files = settings.top_usage(|p| p.is_file(), 3);
+        self.shortcut_places = places;
+    }
+
+    /// Finder-style sidebar shortcuts: PLACES (Home / Desktop / Downloads)
+    /// followed by usage-based FAVORITES. Renders from the cached lists.
+    fn render_shortcuts(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
+        let theme = cx.theme();
+        let places = self.shortcut_places.clone();
+        let fav_folders = self.shortcut_fav_dirs.clone();
+        let fav_files = self.shortcut_fav_files.clone();
+        if places.is_empty() && fav_folders.is_empty() && fav_files.is_empty() {
+            return None;
+        }
+
+        let section_label = |text: &'static str| {
+            div()
+                .px_2()
+                .py_0p5()
+                .text_xs()
+                .font_semibold()
+                .text_color(theme.muted_foreground)
+                .child(text)
+        };
+        let display_name = |p: &Path| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| p.to_string_lossy().to_string())
+        };
+
+        let mut section = v_flex()
+            .flex_none()
+            .w_full()
+            .py_1()
+            .px_1p5()
+            .border_b_1()
+            .border_color(theme.sidebar_border);
+
+        if !places.is_empty() {
+            section = section.child(section_label("PLACES")).children(
+                places
+                    .into_iter()
+                    .map(|(label, p)| self.shortcut_row(cx, p, label, true)),
+            );
+        }
+        if !fav_folders.is_empty() || !fav_files.is_empty() {
+            section = section
+                .child(section_label("FAVORITES"))
+                .children(fav_folders.into_iter().map(|p| {
+                    let label = display_name(&p);
+                    self.shortcut_row(cx, p, label, true)
+                }))
+                .children(fav_files.into_iter().map(|p| {
+                    let label = display_name(&p);
+                    self.shortcut_row(cx, p, label, false)
+                }));
+        }
+        Some(section)
     }
 
 }

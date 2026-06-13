@@ -3,6 +3,7 @@
 //! Stored as JSON at `~/Library/Application Support/MarkForge/settings.json`.
 //! Installed as a GPUI global so any view can read/update it.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -49,6 +50,8 @@ pub struct Settings {
     /// Sidebar background in dark mode (hex, e.g. "#262B3C"); empty = default.
     pub sidebar_bg_dark: String,
     pub recent: Vec<PathBuf>,
+    /// Open counts per path, feeding the sidebar Favorites section.
+    pub usage: HashMap<PathBuf, u32>,
 }
 
 impl Default for Settings {
@@ -65,6 +68,7 @@ impl Default for Settings {
             backdrop_opacity: 0.68,
             sidebar_bg_dark: String::new(),
             recent: Vec::new(),
+            usage: HashMap::new(),
         }
     }
 }
@@ -83,7 +87,32 @@ impl Settings {
         settings.body_font_size = settings.body_font_size.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
         settings.backdrop_opacity = settings.backdrop_opacity.clamp(0.2, 1.0);
         settings.recent.retain(|p| p.exists());
+        settings.usage.retain(|p, _| p.exists());
         settings
+    }
+
+    /// Count an open of `path`; the table is bounded to the heaviest hitters.
+    pub fn bump_usage(&mut self, path: &Path) {
+        *self.usage.entry(path.to_path_buf()).or_insert(0) += 1;
+        if self.usage.len() > 200 {
+            let mut entries: Vec<_> = std::mem::take(&mut self.usage).into_iter().collect();
+            entries.sort_by(|a, b| b.1.cmp(&a.1));
+            entries.truncate(100);
+            self.usage = entries.into_iter().collect();
+        }
+    }
+
+    /// The most-opened existing paths matching `pred`, busiest first.
+    pub fn top_usage(&self, pred: impl Fn(&Path) -> bool, limit: usize) -> Vec<PathBuf> {
+        let mut entries: Vec<(&PathBuf, &u32)> = self.usage.iter().collect();
+        entries.sort_by(|a, b| b.1.cmp(a.1));
+        entries
+            .into_iter()
+            .map(|(p, _)| p)
+            .filter(|p| pred(p))
+            .take(limit)
+            .cloned()
+            .collect()
     }
 
     /// Persist to disk. Errors are logged but never propagated — settings are

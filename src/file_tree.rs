@@ -4,8 +4,10 @@
 //! directory listings (read lazily on expand). `rows()` flattens the visible
 //! tree into a list the view renders.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use crate::import::is_supported_doc;
 
@@ -30,6 +32,10 @@ pub struct FileTree {
     root: Option<PathBuf>,
     expanded: HashSet<PathBuf>,
     cache: HashMap<PathBuf, Vec<FsEntry>>,
+    /// Flattened visible rows, rebuilt lazily after any mutation — `rows()`
+    /// is called every frame (and several times per keystroke during tree
+    /// navigation), so walking the tree each time causes visible jank.
+    rows_cache: RefCell<Option<Rc<Vec<Row>>>>,
 }
 
 impl FileTree {
@@ -45,17 +51,23 @@ impl FileTree {
         self.root.is_some()
     }
 
+    fn invalidate_rows(&self) {
+        *self.rows_cache.borrow_mut() = None;
+    }
+
     /// Open a new root directory (resets expansion + cache).
     pub fn open(&mut self, root: PathBuf) {
         self.expanded.clear();
         self.cache.clear();
         self.ensure(&root);
         self.root = Some(root);
+        self.invalidate_rows();
     }
 
     /// Toggle a directory's expanded state, reading its contents on first
     /// open. Returns `true` when the directory is now expanded.
     pub fn toggle(&mut self, dir: &Path) -> bool {
+        self.invalidate_rows();
         if self.expanded.remove(dir) {
             false
         } else {
@@ -77,6 +89,7 @@ impl FileTree {
         for d in dirs {
             self.ensure(&d);
         }
+        self.invalidate_rows();
     }
 
     /// Collapse all expanded folders and drop their cached listings.
@@ -85,6 +98,7 @@ impl FileTree {
         let root = self.root.clone();
         self.cache
             .retain(|dir, _| Some(dir.as_path()) == root.as_deref());
+        self.invalidate_rows();
     }
 
     fn ensure(&mut self, dir: &Path) {
@@ -94,12 +108,18 @@ impl FileTree {
     }
 
     /// Flatten the visible tree (root's contents + expanded descendants).
-    pub fn rows(&self) -> Vec<Row> {
+    /// Cached until the next mutation.
+    pub fn rows(&self) -> Rc<Vec<Row>> {
+        if let Some(rows) = self.rows_cache.borrow().as_ref() {
+            return rows.clone();
+        }
         let mut out = Vec::new();
         if let Some(root) = &self.root {
             self.walk(root, 0, &mut out);
         }
-        out
+        let rows = Rc::new(out);
+        *self.rows_cache.borrow_mut() = Some(rows.clone());
+        rows
     }
 
     fn walk(&self, dir: &Path, depth: usize, out: &mut Vec<Row>) {
