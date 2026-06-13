@@ -2110,11 +2110,11 @@ impl MarkForge {
                         } else {
                             IconName::ChevronRight
                         })
-                        .size(px(14.))
+                        .size(px(16.))
                         .text_color(chevron_color)
                         .into_any_element()
                     } else {
-                        div().w(px(14.)).into_any_element()
+                        div().w(px(16.)).into_any_element()
                     };
 
                     let type_icon = Icon::new(if !is_dir {
@@ -2124,7 +2124,7 @@ impl MarkForge {
                     } else {
                         IconName::Folder
                     })
-                    .size(px(15.))
+                    .size(px(17.))
                     .text_color(icon_color);
 
                     let weak = weak.clone();
@@ -2132,12 +2132,12 @@ impl MarkForge {
                         .id(id)
                         .flex()
                         .items_center()
-                        .gap_1()
-                        .h(px(26.))
+                        .gap_1p5()
+                        .h(px(32.))
                         .rounded_md()
-                        .pl(px(6. + row.depth as f32 * 14.))
+                        .pl(px(8. + row.depth as f32 * 14.))
                         .pr_2()
-                        .text_sm()
+                        .text_size(px(15.))
                         .text_color(name_color)
                         .cursor_pointer()
                         // Exactly one accent-filled row: the selected entry
@@ -2322,18 +2322,18 @@ impl MarkForge {
             .id(id)
             .flex()
             .items_center()
-            .gap_1()
-            .h(px(24.))
+            .gap_1p5()
+            .h(px(32.))
             .rounded_md()
             .pl_2()
             .pr_2()
-            .text_sm()
+            .text_size(px(15.))
             .cursor_pointer()
             .text_color(theme.sidebar_foreground)
             .hover(|this| this.bg(hover_bg))
             .child(
                 Icon::new(if is_dir { IconName::Folder } else { IconName::File })
-                    .size(px(14.))
+                    .size(px(16.))
                     .text_color(theme.muted_foreground),
             )
             .child(div().flex_1().min_w(px(0.)).truncate().child(label))
@@ -2415,17 +2415,17 @@ impl MarkForge {
             .flex()
             .items_center()
             .gap_1()
+            .h(px(26.))
             .px_1p5()
-            .py_0p5()
             .rounded_md()
             .cursor_pointer()
-            .text_xs()
+            .text_size(px(12.))
             .font_semibold()
             .text_color(theme.muted_foreground)
             .hover(|this| this.bg(gpui::hsla(0.586, 0.92, 0.52, 0.12)))
             .child(
                 Icon::new(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown })
-                    .size(px(12.))
+                    .size(px(13.))
                     .text_color(theme.muted_foreground),
             )
             .child(title)
