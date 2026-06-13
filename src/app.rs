@@ -1923,60 +1923,6 @@ impl MarkForge {
     }
 
     /// VSCode-style file-explorer sidebar.
-    /// Ancestor folder names for the first visible tree row, so a pinned
-    /// header can show "where am I" when scrolled deep into a folder.
-    /// Empty near the top (nothing scrolled off).
-    fn tree_sticky_chain(&self, rows: &[crate::file_tree::Row]) -> Vec<String> {
-        const ROW_H: f32 = 32.0;
-        let offset_y: f32 = self.tree_scroll.offset().y.into();
-        if offset_y >= -ROW_H || rows.is_empty() {
-            return Vec::new();
-        }
-        let first = (((-offset_y) / ROW_H).floor() as usize).min(rows.len() - 1);
-        let depth = rows[first].depth;
-        if depth == 0 {
-            return Vec::new();
-        }
-        // Nearest preceding row at each shallower depth is the ancestor there.
-        let mut chain: Vec<Option<String>> = vec![None; depth];
-        for r in rows[..=first].iter().rev() {
-            if r.depth < depth && chain[r.depth].is_none() {
-                chain[r.depth] = Some(r.entry.name.clone());
-                if chain.iter().all(Option::is_some) {
-                    break;
-                }
-            }
-        }
-        chain.into_iter().flatten().collect()
-    }
-
-    /// Pinned breadcrumb header drawn over the top of the scrolled tree.
-    fn render_tree_sticky(&self, cx: &Context<Self>, chain: Vec<String>) -> impl IntoElement {
-        let theme = cx.theme();
-        div()
-            .absolute()
-            .top_0()
-            .left_0()
-            .right_0()
-            .flex()
-            .items_center()
-            .gap_1()
-            .h(px(26.))
-            .px(px(8.))
-            .bg(theme.sidebar)
-            .border_b_1()
-            .border_color(theme.sidebar_border)
-            .text_xs()
-            .font_semibold()
-            .text_color(theme.muted_foreground)
-            .child(
-                Icon::new(IconName::Folder)
-                    .size(px(13.))
-                    .text_color(theme.muted_foreground),
-            )
-            .child(div().flex_1().min_w(px(0.)).truncate().child(chain.join("  ›  ")))
-    }
-
     fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let weak = cx.entity().downgrade();
@@ -2127,7 +2073,6 @@ impl MarkForge {
                 .into_any_element()
         } else {
             let rows = self.file_tree.rows();
-            let sticky = self.tree_sticky_chain(&rows);
             let cursor = self.tree_cursor.clone();
             let git = self.git.clone();
             // macOS system accent blue (selectedContentBackgroundColor), white on top.
@@ -2138,18 +2083,7 @@ impl MarkForge {
             // The keyboard cursor: stronger than hover, weaker than selection.
             // Subordinate to the open-document accent: a gentle keyboard-focus
             // tint, not a second "selection".
-            let tree = v_flex()
-                .id("tree-scroll")
-                .size_full()
-                // Re-render on scroll so the sticky folder header stays current.
-                .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
-                .w_full()
-                .min_h(px(0.))
-                .py_1()
-                .px_1p5()
-                .overflow_y_scroll()
-                .track_scroll(&self.tree_scroll)
-                .children(rows.iter().cloned().map(move |row| {
+            let tree_rows = rows.iter().cloned().map(move |row| {
                     let path = row.entry.path.clone();
                     let is_dir = row.entry.is_dir;
                     // One selection = the last clicked/opened row, file OR
@@ -2260,17 +2194,24 @@ impl MarkForge {
                                 this.on_tree_entry(path.clone(), is_dir, window, cx)
                             });
                         })
-                }));
+                        .into_any_element()
+                });
 
-            div()
-                .relative()
+            // One continuous scroll area: PLACES/FAVORITES/iCLOUD NOTES
+            // sections expand in place, flowing straight into the file tree.
+            let mut items = self.shortcut_items(cx);
+            items.extend(tree_rows);
+
+            v_flex()
+                .id("sidebar-scroll")
                 .flex_1()
                 .w_full()
                 .min_h(px(0.))
-                .child(tree)
-                .when(!sticky.is_empty(), |this| {
-                    this.child(self.render_tree_sticky(cx, sticky))
-                })
+                .py_1()
+                .px_1p5()
+                .overflow_y_scroll()
+                .track_scroll(&self.tree_scroll)
+                .children(items)
                 .into_any_element()
         };
 
@@ -2387,7 +2328,6 @@ impl MarkForge {
             .border_r_1()
             .border_color(theme.sidebar_border)
             .child(header)
-            .children(self.render_shortcuts(cx))
             .child(body)
             .children(commit_panel)
     }
@@ -2524,17 +2464,14 @@ impl MarkForge {
             })
     }
 
-    /// Finder-style sidebar shortcuts: collapsible PLACES, FAVORITES and (once
-    /// imported) iCLOUD NOTES sections.
-    fn render_shortcuts(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
-        let theme = cx.theme();
+    /// Collapsible PLACES, FAVORITES and (once imported) iCLOUD NOTES sections,
+    /// returned as a flat list so they share the file tree's single scroll
+    /// area — sections expand in place, no separate top block.
+    fn shortcut_items(&self, cx: &Context<Self>) -> Vec<gpui::AnyElement> {
         let places = self.shortcut_places.clone();
         let fav_folders = self.shortcut_fav_dirs.clone();
         let fav_files = self.shortcut_fav_files.clone();
         let notes = self.shortcut_notes.clone();
-        if places.is_empty() && fav_folders.is_empty() && fav_files.is_empty() && notes.is_empty() {
-            return None;
-        }
 
         let display_name = |p: &Path| {
             p.file_name()
@@ -2543,48 +2480,38 @@ impl MarkForge {
         };
         let shown = |title: &str| !self.collapsed_sections.contains(title);
 
-        let mut section = v_flex()
-            .flex_none()
-            .w_full()
-            .py_1()
-            .px_1p5()
-            .border_b_1()
-            .border_color(theme.sidebar_border);
-
+        let mut items: Vec<gpui::AnyElement> = Vec::new();
         if !places.is_empty() {
-            section = section.child(self.section_header(cx, "PLACES"));
+            items.push(self.section_header(cx, "PLACES").into_any_element());
             if shown("PLACES") {
-                section = section.children(
-                    places
-                        .into_iter()
-                        .map(|(label, p)| self.shortcut_row(cx, p, label, true)),
-                );
+                for (label, p) in places {
+                    items.push(self.shortcut_row(cx, p, label, true).into_any_element());
+                }
             }
         }
         if !fav_folders.is_empty() || !fav_files.is_empty() {
-            section = section.child(self.section_header(cx, "FAVORITES"));
+            items.push(self.section_header(cx, "FAVORITES").into_any_element());
             if shown("FAVORITES") {
-                section = section
-                    .children(fav_folders.into_iter().map(|p| {
-                        let label = display_name(&p);
-                        self.shortcut_row(cx, p, label, true)
-                    }))
-                    .children(fav_files.into_iter().map(|p| {
-                        let label = display_name(&p);
-                        self.shortcut_row(cx, p, label, false)
-                    }));
+                for p in fav_folders {
+                    let label = display_name(&p);
+                    items.push(self.shortcut_row(cx, p, label, true).into_any_element());
+                }
+                for p in fav_files {
+                    let label = display_name(&p);
+                    items.push(self.shortcut_row(cx, p, label, false).into_any_element());
+                }
             }
         }
         if !notes.is_empty() {
-            section = section.child(self.section_header(cx, "ICLOUD NOTES"));
+            items.push(self.section_header(cx, "ICLOUD NOTES").into_any_element());
             if shown("ICLOUD NOTES") {
-                section = section.children(notes.into_iter().map(|p| {
+                for p in notes {
                     let label = display_name(&p);
-                    self.shortcut_row(cx, p, label, true)
-                }));
+                    items.push(self.shortcut_row(cx, p, label, true).into_any_element());
+                }
             }
         }
-        Some(section)
+        items
     }
 
 }
