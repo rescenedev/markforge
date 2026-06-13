@@ -1,6 +1,6 @@
 [package]
 name = "markforge"
-version = "0.1.16"
+version = "0.1.17"
 edition = "2024"
 description = "A native macOS Markdown viewer (and, soon, editor) built on GPUI."
 publish = false
