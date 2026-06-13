@@ -354,8 +354,14 @@ impl MarkForge {
             let highlight = text.len() <= HIGHLIGHT_MAX_BYTES;
             self.set_doc_kind(DocKind::Code { lang, highlight }, cx);
         }
-        self.input_state
-            .update(cx, |state, cx| state.set_value(text.clone(), window, cx));
+        // Soft-wrap prose (Markdown); for code, scroll horizontally instead so
+        // a window resize doesn't re-wrap every line of a huge file (the main
+        // source of resize jank on large JSON/code documents).
+        let wrap = matches!(self.doc_kind, DocKind::Markdown);
+        self.input_state.update(cx, |state, cx| {
+            state.set_value(text.clone(), window, cx);
+            state.set_soft_wrap(wrap, window, cx);
+        });
         self.preview_text = self.wrap_preview(text);
     }
 
