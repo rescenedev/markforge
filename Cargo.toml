@@ -52,6 +52,7 @@ pdf-extract = "0.10.0"
 objc2-core-graphics = "0.3.2"
 objc2-core-foundation = "0.3.2"
 png = "0.18.1"
+htmd = "0.5.4"
 
 # Use a local, lightly-patched copy of gpui-component (task-list checkbox
 # alignment fix in crates/ui/src/text/node.rs). Same revision as the git dep.

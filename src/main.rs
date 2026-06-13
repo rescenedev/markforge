@@ -8,6 +8,7 @@ mod app;
 mod file_tree;
 mod git;
 mod import;
+mod notes;
 mod pdf;
 mod rem_scaled;
 mod settings;
@@ -49,6 +50,7 @@ actions!(
         TreeConfirm,
         ToggleDiff,
         ToggleRenderedDiff,
+        ImportNotes,
         CommitAll,
         GitPush,
         GitPull,
@@ -196,6 +198,7 @@ pub fn set_menus(cx: &mut App) {
             items: vec![
                 MenuItem::action("Open…", OpenFile),
                 MenuItem::action("Open Folder…", OpenFolder),
+                MenuItem::action("Import iCloud Notes…", ImportNotes),
                 MenuItem::Submenu(Menu {
                     name: "Open Recent".into(),
                     items: recent_items,

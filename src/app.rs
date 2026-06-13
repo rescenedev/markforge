@@ -38,8 +38,8 @@ use crate::import::{is_imported_doc, is_supported_doc, read_document};
 use crate::rem_scaled::RemScaled;
 use crate::settings::{Settings, ThemePref, parse_hex_color};
 use crate::{
-    CheckoutBranch, CloseWindow, CommitAll, DiscardChanges, GitPull, GitPush, OpenFile,
-    OpenFolder, OpenRecent, OpenRevision, Quit, Reload, Save, SetSyntaxTheme, SetTheme,
+    CheckoutBranch, CloseWindow, CommitAll, DiscardChanges, GitPull, GitPush, ImportNotes,
+    OpenFile, OpenFolder, OpenRecent, OpenRevision, Quit, Reload, Save, SetSyntaxTheme, SetTheme,
     ToggleDiff, ToggleEdit, ToggleRenderedDiff, ToggleSettings, ToggleSidebar, ToggleTheme,
     TreeConfirm, TreeDown, TreeLeft, TreeRight, TreeUp, ZoomIn, ZoomOut, ZoomReset,
 };
@@ -1118,6 +1118,42 @@ impl MarkForge {
 
     fn on_open(&mut self, _: &OpenFile, window: &mut Window, cx: &mut Context<Self>) {
         self.guard_unsaved(window, cx, |this, window, cx| this.prompt_open(window, cx));
+    }
+
+    /// Export every Apple/iCloud note to a folder of Markdown files (via the
+    /// Notes AppleScript interface) and open it in the sidebar.
+    fn on_import_notes(&mut self, _: &ImportNotes, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dest) = crate::notes::import_dir() else {
+            return;
+        };
+        window.push_notification(
+            (NotificationType::Info, "Importing iCloud Notes…"),
+            cx,
+        );
+        let export = {
+            let dest = dest.clone();
+            cx.background_executor().spawn(async move {
+                std::fs::create_dir_all(&dest)?;
+                crate::notes::export(&dest)
+            })
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let result = export.await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(count) => {
+                    this.open_folder(dest.clone(), cx);
+                    window.push_notification(
+                        (NotificationType::Success, format!("Imported {count} notes")),
+                        cx,
+                    );
+                }
+                Err(err) => window.push_notification(
+                    (NotificationType::Error, err.to_string()),
+                    cx,
+                ),
+            });
+        })
+        .detach();
     }
 
     /// Show the native picker for a Markdown file or a folder.
@@ -2440,6 +2476,7 @@ impl Render for MarkForge {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::on_open))
             .on_action(cx.listener(Self::on_open_folder))
+            .on_action(cx.listener(Self::on_import_notes))
             .on_action(cx.listener(Self::on_open_recent))
             .on_action(cx.listener(Self::on_reload))
             .on_action(cx.listener(Self::on_save))
