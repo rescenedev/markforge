@@ -3,8 +3,8 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Bounds, Element, ElementId, Entity, GlobalElementId, Hitbox, HitboxBehavior,
-    InspectorElementId, InteractiveElement, IntoElement, LayoutId, ParentElement, Pixels,
-    SharedString, StyleRefinement, Styled, Window, div,
+    InspectorElementId, InteractiveElement, IntoElement, KeyDownEvent, LayoutId, MouseButton,
+    ParentElement, Pixels, SharedString, StyleRefinement, Styled, Window, div, px,
 };
 
 use crate::StyledExt;
@@ -215,7 +215,32 @@ impl Element for TextView {
             .key_context("TextView")
             .track_focus(&focus_handle)
             .when(self.scrollable, |this| {
-                this.size_full().vertical_scrollbar(&list_state)
+                // MarkForge patch: keyboard paging (PageUp/PageDown/Home/End/
+                // Space) for the rendered preview. Clicking focuses it so the
+                // keys reach here.
+                let key_list = list_state.clone();
+                let key_focus = focus_handle.clone();
+                this.size_full()
+                    .vertical_scrollbar(&list_state)
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        window.focus(&key_focus, cx);
+                    })
+                    .on_key_down(move |ev: &KeyDownEvent, window, _cx| {
+                        let page = {
+                            let h = key_list.viewport_bounds().size.height;
+                            if h > px(0.) { h * 0.9 } else { px(500.) }
+                        };
+                        match ev.keystroke.key.as_str() {
+                            "pagedown" => key_list.scroll_by(page),
+                            "pageup" => key_list.scroll_by(-page),
+                            "space" if ev.keystroke.modifiers.shift => key_list.scroll_by(-page),
+                            "space" => key_list.scroll_by(page),
+                            "home" => key_list.scroll_by(px(-1_000_000.)),
+                            "end" => key_list.scroll_to_end(),
+                            _ => return,
+                        }
+                        window.refresh();
+                    })
             })
             .relative()
             .on_action(move |_: &crate::input::Copy, window, cx| {
