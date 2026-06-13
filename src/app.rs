@@ -471,12 +471,7 @@ impl MarkForge {
             }
         }
 
-        // Git context follows the open document: in a multi-repo workspace
-        // the branch chip / badges / commit panel reflect the repository the
-        // current file lives in (repo_status falls back to "not a repo").
-        if let Some(parent) = path.parent() {
-            self.start_git_poll(parent.to_path_buf(), cx);
-        }
+        self.refresh_git_context(cx);
 
         let settings = cx.global_mut::<Settings>();
         settings.push_recent(path.clone());
@@ -718,7 +713,7 @@ impl MarkForge {
         // New root: stale cache entries are useless now; preload the new dir.
         self.doc_cache.clear();
         self.preload_dir(path.clone(), cx);
-        self.start_git_poll(path.clone(), cx);
+        self.refresh_git_context(cx);
         let settings = cx.global_mut::<Settings>();
         settings.push_recent(path.clone());
         settings.bump_usage(&path);
@@ -1075,6 +1070,22 @@ impl MarkForge {
             });
         })
         .detach();
+    }
+
+    /// Point the git poller at the right directory: the open document's repo
+    /// takes priority (so the branch chip / commit panel keep showing it even
+    /// while you browse an unrelated folder like Home), falling back to the
+    /// tree root when no document is open.
+    fn refresh_git_context(&mut self, cx: &mut Context<Self>) {
+        let dir = self
+            .file_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(Path::to_path_buf)
+            .or_else(|| self.file_tree.root().map(Path::to_path_buf));
+        if let Some(dir) = dir {
+            self.start_git_poll(dir, cx);
+        }
     }
 
     /// Poll `git status` for `dir` on the background executor, updating the
