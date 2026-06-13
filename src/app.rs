@@ -1663,10 +1663,22 @@ impl MarkForge {
         }
     }
 
+    /// Folder the open document lives in (immediate parent name), for the
+    /// title-bar breadcrumb so you always know where this file is.
+    fn document_parent(&self) -> Option<String> {
+        self.file_path
+            .as_ref()?
+            .parent()?
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+    }
+
     fn render_title_bar(&self, cx: &Context<Self>) -> impl IntoElement {
         let is_dark = cx.theme().mode.is_dark();
         let theme_icon = if is_dark { IconName::Sun } else { IconName::Moon };
         let editing = self.editing;
+        let parent = self.document_parent();
+        let muted = cx.theme().muted_foreground;
 
         TitleBar::new().child(
             h_flex()
@@ -1689,6 +1701,17 @@ impl MarkForge {
                                 }),
                         )
                         .child(Icon::new(IconName::BookOpen))
+                        .when_some(parent, |this, parent| {
+                            this.child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .text_color(muted)
+                                    .child(Icon::new(IconName::Folder).size(px(13.)))
+                                    .child(parent)
+                                    .child(div().child("›")),
+                            )
+                        })
                         .child(div().font_semibold().child(self.document_title())),
                 )
                 .child(
