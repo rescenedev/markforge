@@ -51,6 +51,8 @@ pub struct Settings {
     pub git_auto_commit: bool,
     /// Sidebar background in dark mode (hex, e.g. "#262B3C"); empty = default.
     pub sidebar_bg_dark: String,
+    /// Sidebar section headers the user has collapsed (e.g. "FAVORITES").
+    pub collapsed_sections: Vec<String>,
     pub recent: Vec<PathBuf>,
     /// Open counts per path, feeding the sidebar Favorites section.
     pub usage: HashMap<PathBuf, u32>,
@@ -70,6 +72,7 @@ impl Default for Settings {
             backdrop_opacity: 0.68,
             git_auto_commit: false,
             sidebar_bg_dark: String::new(),
+            collapsed_sections: Vec::new(),
             recent: Vec::new(),
             usage: HashMap::new(),
         }

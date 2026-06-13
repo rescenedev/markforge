@@ -26,7 +26,7 @@ use gpui_component::{
     menu::DropdownMenu as _,
     highlighter::{HighlightTheme, Language},
     input::{Input, InputEvent, InputState},
-    notification::NotificationType,
+    notification::{Notification, NotificationType},
     resizable::{h_resizable, resizable_panel},
     text::{TextView, TextViewStyle, markdown},
     v_flex,
@@ -186,6 +186,10 @@ pub struct MarkForge {
     shortcut_places: Vec<(String, PathBuf)>,
     shortcut_fav_dirs: Vec<PathBuf>,
     shortcut_fav_files: Vec<PathBuf>,
+    /// Top-level folders of imported iCloud Notes (the iCLOUD NOTES section).
+    shortcut_notes: Vec<PathBuf>,
+    /// Sidebar section headers the user has collapsed.
+    collapsed_sections: std::collections::HashSet<String>,
     /// Commit-message field at the bottom of the sidebar.
     commit_input: gpui::Entity<InputState>,
     _subscriptions: Vec<Subscription>,
@@ -271,6 +275,8 @@ impl MarkForge {
             shortcut_places: Vec::new(),
             shortcut_fav_dirs: Vec::new(),
             shortcut_fav_files: Vec::new(),
+            shortcut_notes: Vec::new(),
+            collapsed_sections: settings.collapsed_sections.iter().cloned().collect(),
             commit_input,
             _subscriptions: vec![input_sub, commit_sub, appearance_sub],
         };
@@ -1126,8 +1132,15 @@ impl MarkForge {
         let Some(dest) = crate::notes::import_dir() else {
             return;
         };
+        // A persistent notification (no autohide) so the long export shows it's
+        // working; removed by type on completion.
         window.push_notification(
-            (NotificationType::Info, "Importing iCloud Notes…"),
+            Notification::new()
+                .id::<ImportNotes>()
+                .with_type(NotificationType::Info)
+                .title("Importing iCloud Notes…")
+                .message("This can take a minute. Approve the Notes prompt if asked.")
+                .autohide(false),
             cx,
         );
         let export = {
@@ -1139,18 +1152,21 @@ impl MarkForge {
         };
         cx.spawn_in(window, async move |this, cx| {
             let result = export.await;
-            let _ = this.update_in(cx, |this, window, cx| match result {
-                Ok(count) => {
-                    this.open_folder(dest.clone(), cx);
-                    window.push_notification(
-                        (NotificationType::Success, format!("Imported {count} notes")),
+            let _ = this.update_in(cx, |this, window, cx| {
+                window.remove_notification::<ImportNotes>(cx);
+                match result {
+                    Ok(count) => {
+                        this.open_folder(dest.clone(), cx);
+                        window.push_notification(
+                            (NotificationType::Success, format!("Imported {count} notes")),
+                            cx,
+                        );
+                    }
+                    Err(err) => window.push_notification(
+                        (NotificationType::Error, err.to_string()),
                         cx,
-                    );
+                    ),
                 }
-                Err(err) => window.push_notification(
-                    (NotificationType::Error, err.to_string()),
-                    cx,
-                ),
             });
         })
         .detach();
@@ -2350,40 +2366,92 @@ impl MarkForge {
                 }
             }
         }
+        let notes_dir = crate::notes::import_dir();
+        self.shortcut_notes = notes_dir
+            .as_deref()
+            .and_then(|d| std::fs::read_dir(d).ok())
+            .map(|rd| {
+                let mut dirs: Vec<PathBuf> = rd
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir())
+                    .collect();
+                dirs.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
+                dirs
+            })
+            .unwrap_or_default();
+
         let settings = cx.global::<Settings>();
         self.shortcut_fav_dirs = settings.top_usage(
-            |p| p.is_dir() && !places.iter().any(|(_, place)| place == p),
+            |p| {
+                p.is_dir()
+                    && !places.iter().any(|(_, place)| place.as_path() == p)
+                    && notes_dir.as_deref() != Some(p)
+            },
             3,
         );
         self.shortcut_fav_files = settings.top_usage(|p| p.is_file(), 3);
         self.shortcut_places = places;
     }
 
-    /// Finder-style sidebar shortcuts: PLACES (Home / Desktop / Downloads)
-    /// followed by usage-based FAVORITES. Renders from the cached lists.
+    /// Collapse/expand a sidebar section header, persisting the choice.
+    fn toggle_section(&mut self, title: &str, cx: &mut Context<Self>) {
+        if !self.collapsed_sections.remove(title) {
+            self.collapsed_sections.insert(title.to_string());
+        }
+        cx.global_mut::<Settings>().collapsed_sections =
+            self.collapsed_sections.iter().cloned().collect();
+        save_settings(cx);
+        cx.notify();
+    }
+
+    /// A collapsible section header (chevron + label); click toggles.
+    fn section_header(&self, cx: &Context<Self>, title: &'static str) -> impl IntoElement {
+        let theme = cx.theme();
+        let collapsed = self.collapsed_sections.contains(title);
+        let weak = cx.entity().downgrade();
+        div()
+            .id(SharedString::from(format!("sec-{title}")))
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_1p5()
+            .py_0p5()
+            .rounded_md()
+            .cursor_pointer()
+            .text_xs()
+            .font_semibold()
+            .text_color(theme.muted_foreground)
+            .hover(|this| this.bg(gpui::hsla(0.586, 0.92, 0.52, 0.12)))
+            .child(
+                Icon::new(if collapsed { IconName::ChevronRight } else { IconName::ChevronDown })
+                    .size(px(12.))
+                    .text_color(theme.muted_foreground),
+            )
+            .child(title)
+            .on_click(move |_, _, cx| {
+                let _ = weak.update(cx, |this, cx| this.toggle_section(title, cx));
+            })
+    }
+
+    /// Finder-style sidebar shortcuts: collapsible PLACES, FAVORITES and (once
+    /// imported) iCLOUD NOTES sections.
     fn render_shortcuts(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
         let theme = cx.theme();
         let places = self.shortcut_places.clone();
         let fav_folders = self.shortcut_fav_dirs.clone();
         let fav_files = self.shortcut_fav_files.clone();
-        if places.is_empty() && fav_folders.is_empty() && fav_files.is_empty() {
+        let notes = self.shortcut_notes.clone();
+        if places.is_empty() && fav_folders.is_empty() && fav_files.is_empty() && notes.is_empty() {
             return None;
         }
 
-        let section_label = |text: &'static str| {
-            div()
-                .px_2()
-                .py_0p5()
-                .text_xs()
-                .font_semibold()
-                .text_color(theme.muted_foreground)
-                .child(text)
-        };
         let display_name = |p: &Path| {
             p.file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| p.to_string_lossy().to_string())
         };
+        let shown = |title: &str| !self.collapsed_sections.contains(title);
 
         let mut section = v_flex()
             .flex_none()
@@ -2394,23 +2462,37 @@ impl MarkForge {
             .border_color(theme.sidebar_border);
 
         if !places.is_empty() {
-            section = section.child(section_label("PLACES")).children(
-                places
-                    .into_iter()
-                    .map(|(label, p)| self.shortcut_row(cx, p, label, true)),
-            );
+            section = section.child(self.section_header(cx, "PLACES"));
+            if shown("PLACES") {
+                section = section.children(
+                    places
+                        .into_iter()
+                        .map(|(label, p)| self.shortcut_row(cx, p, label, true)),
+                );
+            }
         }
         if !fav_folders.is_empty() || !fav_files.is_empty() {
-            section = section
-                .child(section_label("FAVORITES"))
-                .children(fav_folders.into_iter().map(|p| {
+            section = section.child(self.section_header(cx, "FAVORITES"));
+            if shown("FAVORITES") {
+                section = section
+                    .children(fav_folders.into_iter().map(|p| {
+                        let label = display_name(&p);
+                        self.shortcut_row(cx, p, label, true)
+                    }))
+                    .children(fav_files.into_iter().map(|p| {
+                        let label = display_name(&p);
+                        self.shortcut_row(cx, p, label, false)
+                    }));
+            }
+        }
+        if !notes.is_empty() {
+            section = section.child(self.section_header(cx, "ICLOUD NOTES"));
+            if shown("ICLOUD NOTES") {
+                section = section.children(notes.into_iter().map(|p| {
                     let label = display_name(&p);
                     self.shortcut_row(cx, p, label, true)
-                }))
-                .children(fav_files.into_iter().map(|p| {
-                    let label = display_name(&p);
-                    self.shortcut_row(cx, p, label, false)
                 }));
+            }
         }
         Some(section)
     }
