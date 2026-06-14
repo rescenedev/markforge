@@ -313,4 +313,48 @@ mod tests {
         assert_eq!(unique_stem(&mut used, "note".into()), "note-3");
         assert_eq!(unique_stem(&mut used, String::new()), "Untitled");
     }
+
+    // ---- RecordReader: streaming split on the RECORD delimiter ----
+
+    fn read_all_records(input: &str) -> Vec<String> {
+        let mut rr = RecordReader::new(std::io::Cursor::new(input.as_bytes().to_vec()));
+        let mut out = Vec::new();
+        while let Some(rec) = rr.next_record().unwrap() {
+            out.push(String::from_utf8_lossy(&rec).into_owned());
+        }
+        out
+    }
+
+    #[test]
+    fn record_reader_returns_terminated_records() {
+        // The export writes "<record>@@MF-R@@" per note → delimiter-terminated.
+        let r = std::str::from_utf8(RECORD).unwrap();
+        let input = format!("alpha{r}beta{r}gamma{r}");
+        assert_eq!(read_all_records(&input), ["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn record_reader_skips_empty_records() {
+        let r = std::str::from_utf8(RECORD).unwrap();
+        let input = format!("{r}alpha{r}{r}beta{r}"); // leading + doubled delimiters
+        assert_eq!(read_all_records(&input), ["alpha", "beta"]);
+    }
+
+    #[test]
+    fn record_reader_empty_input_yields_nothing() {
+        assert!(read_all_records("").is_empty());
+    }
+
+    #[test]
+    fn record_reader_splits_record_larger_than_read_chunk() {
+        // A note bigger than the 256 KiB read buffer must still split correctly
+        // (this exercises the incremental `scanned` cursor that fixed the old
+        // quadratic re-scan).
+        let r = std::str::from_utf8(RECORD).unwrap();
+        let big = "x".repeat(300 * 1024);
+        let recs = read_all_records(&format!("{big}{r}tail{r}"));
+        assert_eq!(recs.len(), 2);
+        assert_eq!(recs[0].len(), 300 * 1024);
+        assert_eq!(recs[1], "tail");
+    }
 }
