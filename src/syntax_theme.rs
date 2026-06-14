@@ -161,3 +161,24 @@ const MONOKAI: &str = r##"{
     }
   }
 }"##;
+
+#[cfg(test)]
+mod tests {
+    use super::{PRESETS, load};
+
+    #[test]
+    fn every_preset_json_parses() {
+        // Catches a typo in a bundled theme blob or a PRESETS entry without a
+        // matching arm — either would silently make the menu item a no-op.
+        for name in PRESETS {
+            assert!(load(name).is_some(), "preset {name} should parse");
+        }
+    }
+
+    #[test]
+    fn unknown_or_default_returns_none() {
+        assert!(load("Default").is_none());
+        assert!(load("").is_none());
+        assert!(load("Nonexistent Theme").is_none());
+    }
+}

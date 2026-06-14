@@ -162,3 +162,77 @@ fn read_dir_sorted(dir: &Path) -> Vec<FsEntry> {
     });
     entries
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A unique scratch directory (no `tempfile` dependency).
+    fn temp_dir(label: &str) -> PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let p = std::env::temp_dir().join(format!(
+            "markforge-ft-{label}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn read_dir_sorted_filters_and_orders() {
+        let dir = temp_dir("readdir");
+        std::fs::create_dir(dir.join("zeta")).unwrap();
+        std::fs::create_dir(dir.join("alpha")).unwrap();
+        for f in ["b.md", "A.md", "c.txt", ".hidden", "binary.exe"] {
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+        let names: Vec<String> = read_dir_sorted(&dir).into_iter().map(|e| e.name).collect();
+        // dotfiles + unsupported files dropped; dirs first, then case-insensitive.
+        assert_eq!(names, ["alpha", "zeta", "A.md", "b.md", "c.txt"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_dir_sorted_missing_dir_is_empty() {
+        let dir = std::env::temp_dir().join("markforge-ft-definitely-not-here-xyz");
+        assert!(read_dir_sorted(&dir).is_empty());
+    }
+
+    #[test]
+    fn rows_under_expands_lazily() {
+        let dir = temp_dir("rows");
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub").join("child.md"), b"x").unwrap();
+        std::fs::write(dir.join("top.md"), b"x").unwrap();
+
+        let mut ft = FileTree::new();
+        ft.expand(&dir);
+        let rows = ft.rows_under(&dir);
+        assert_eq!(rows[0].depth, 0, "root is depth 0");
+        assert!(rows.iter().any(|r| r.depth == 1 && r.entry.name == "sub"));
+        assert!(rows.iter().any(|r| r.depth == 1 && r.entry.name == "top.md"));
+        // "sub" isn't expanded yet, so its child stays hidden.
+        assert!(!rows.iter().any(|r| r.entry.name == "child.md"));
+
+        ft.expand(&dir.join("sub"));
+        let rows = ft.rows_under(&dir);
+        assert!(rows.iter().any(|r| r.depth == 2 && r.entry.name == "child.md"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn toggle_reports_and_flips_state() {
+        let dir = temp_dir("toggle");
+        assert!(ft_toggle_twice(&dir));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn ft_toggle_twice(dir: &Path) -> bool {
+        let mut ft = FileTree::new();
+        let opened = ft.toggle(dir); // now expanded
+        let closed = ft.toggle(dir); // now collapsed
+        opened && !closed
+    }
+}
