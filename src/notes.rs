@@ -250,3 +250,67 @@ fn unique_stem(used: &mut HashSet<String>, base: String) -> String {
     }
     unreachable!()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_locates_needle() {
+        assert_eq!(find(b"hello world", b"world"), Some(6));
+        assert_eq!(find(b"abc", b"xyz"), None);
+    }
+
+    #[test]
+    fn split3_extracts_folder_title_body() {
+        let rec = [
+            b"Work".as_slice(),
+            FIELD,
+            b"My Note".as_slice(),
+            FIELD,
+            b"Body text".as_slice(),
+        ]
+        .concat();
+        let (folder, title, body) = split3(&rec).expect("three fields");
+        assert_eq!(folder, "Work");
+        assert_eq!(title, "My Note");
+        assert_eq!(body, "Body text");
+    }
+
+    #[test]
+    fn split3_needs_two_delimiters() {
+        let rec = [b"Work".as_slice(), FIELD, b"Only one".as_slice()].concat();
+        assert!(split3(&rec).is_none());
+    }
+
+    #[test]
+    fn strip_inline_images_drops_data_uris() {
+        let html = r#"<img src="data:image/png;base64,AAAABBBB"> text"#;
+        let out = strip_inline_images(html);
+        assert!(!out.contains("AAAABBBB"), "base64 payload removed");
+        assert!(out.contains("text"), "surrounding text kept");
+    }
+
+    #[test]
+    fn sanitize_replaces_separators_and_trims_dots() {
+        assert_eq!(sanitize("a/b:c"), "a-b-c");
+        assert_eq!(sanitize("...hidden"), "hidden");
+        assert_eq!(sanitize("   "), "Untitled");
+        assert_eq!(sanitize(""), "Untitled");
+    }
+
+    #[test]
+    fn sanitize_title_takes_first_line_capped() {
+        assert_eq!(sanitize_title("Title here\nsecond line"), "Title here");
+        assert_eq!(sanitize_title(&"x".repeat(200)).chars().count(), 80);
+    }
+
+    #[test]
+    fn unique_stem_disambiguates_collisions() {
+        let mut used = std::collections::HashSet::new();
+        assert_eq!(unique_stem(&mut used, "note".into()), "note");
+        assert_eq!(unique_stem(&mut used, "note".into()), "note-2");
+        assert_eq!(unique_stem(&mut used, "note".into()), "note-3");
+        assert_eq!(unique_stem(&mut used, String::new()), "Untitled");
+    }
+}

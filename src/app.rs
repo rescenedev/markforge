@@ -2731,3 +2731,45 @@ fn first_markdown(paths: &[PathBuf]) -> Option<PathBuf> {
         .or_else(|| paths.first())
         .cloned()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{first_markdown, prettify_minified_json};
+    use std::path::PathBuf;
+
+    #[test]
+    fn prettify_expands_minified_json() {
+        let out = prettify_minified_json(r#"{"a":1,"b":[2,3]}"#).expect("valid json");
+        assert!(out.contains('\n'), "should be multi-line");
+        assert!(out.contains("\"a\""));
+    }
+
+    #[test]
+    fn prettify_skips_already_formatted() {
+        // a newline within the first 4 KiB means it's already laid out.
+        assert!(prettify_minified_json("{\n  \"a\": 1\n}").is_none());
+    }
+
+    #[test]
+    fn prettify_rejects_non_json() {
+        assert!(prettify_minified_json("{not json}").is_none());
+        assert!(prettify_minified_json(r#"{"a":1,}"#).is_none()); // trailing comma
+    }
+
+    #[test]
+    fn first_markdown_prefers_supported_doc() {
+        let paths = vec![
+            PathBuf::from("/x/image.png"),
+            PathBuf::from("/x/readme.md"),
+            PathBuf::from("/x/a.bin"),
+        ];
+        assert_eq!(first_markdown(&paths), Some(PathBuf::from("/x/readme.md")));
+    }
+
+    #[test]
+    fn first_markdown_falls_back_to_first_when_none_supported() {
+        let paths = vec![PathBuf::from("/x/a.bin"), PathBuf::from("/x/b.png")];
+        assert_eq!(first_markdown(&paths), Some(PathBuf::from("/x/a.bin")));
+        assert_eq!(first_markdown(&[]), None);
+    }
+}
