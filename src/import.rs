@@ -359,3 +359,49 @@ fn collapse_blank_lines(text: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{collapse_blank_lines, is_imported_doc, is_supported_doc};
+    use std::path::Path;
+
+    #[test]
+    fn supported_extensions_accepted() {
+        for p in [
+            "a.md", "a.markdown", "a.txt", "a.json", "a.rs", "a.tsx", "a.yaml", "a.toml",
+            "a.docx", "a.hwpx", "a.pdf",
+        ] {
+            assert!(is_supported_doc(Path::new(p)), "{p} should be supported");
+        }
+    }
+
+    #[test]
+    fn supported_is_case_insensitive() {
+        assert!(is_supported_doc(Path::new("README.MD")));
+        assert!(is_supported_doc(Path::new("deck.PDF")));
+    }
+
+    #[test]
+    fn unsupported_extensions_rejected() {
+        for p in ["a.exe", "a.png", "a.zip", "noext", "a.docxx"] {
+            assert!(!is_supported_doc(Path::new(p)), "{p} should be unsupported");
+        }
+    }
+
+    #[test]
+    fn imported_are_converter_formats_only() {
+        for p in ["a.docx", "a.hwpx", "a.pdf", "DECK.PDF"] {
+            assert!(is_imported_doc(Path::new(p)), "{p} converts");
+        }
+        for p in ["a.md", "a.json", "a.txt"] {
+            assert!(!is_imported_doc(Path::new(p)), "{p} is read directly");
+        }
+    }
+
+    #[test]
+    fn collapse_blank_lines_caps_at_one_blank() {
+        assert_eq!(collapse_blank_lines("a\n\n\n\nb"), "a\n\nb");
+        assert_eq!(collapse_blank_lines("a\nb"), "a\nb");
+        assert_eq!(collapse_blank_lines("a\n\nb"), "a\n\nb");
+    }
+}

@@ -372,3 +372,106 @@ fn write_png(out: &Path, width: usize, height: usize, rgba: &[u8]) -> io::Result
     writer.write_image_data(rgba).map_err(invalid)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- content_span: the whitespace-trim core ----
+
+    #[test]
+    fn span_blank_is_none() {
+        assert_eq!(content_span(&vec![0u32; 100], 5), None);
+    }
+
+    #[test]
+    fn span_below_threshold_is_none() {
+        assert_eq!(content_span(&vec![3u32; 100], 5), None);
+    }
+
+    #[test]
+    fn span_single_block() {
+        let mut ink = vec![0u32; 100];
+        ink[10..20].fill(10);
+        assert_eq!(content_span(&ink, 5), Some((10, 20)));
+    }
+
+    #[test]
+    fn span_merges_small_gap() {
+        // a 4-line gap (< CONTENT_GAP·100 = 6) bridges the runs.
+        let mut ink = vec![0u32; 100];
+        ink[10..20].fill(10);
+        ink[24..30].fill(10);
+        assert_eq!(content_span(&ink, 5), Some((10, 30)));
+    }
+
+    #[test]
+    fn span_drops_sparse_stray_across_big_gap() {
+        // a faint footer far from the dense block is excluded, not merged —
+        // this is what stops a page number from defeating the trim.
+        let mut ink = vec![0u32; 100];
+        ink[10..20].fill(10); // ink 100 (densest)
+        ink[90] = 10; // ink 10 < 15% of 100 → stray
+        assert_eq!(content_span(&ink, 5), Some((10, 20)));
+    }
+
+    #[test]
+    fn span_keeps_two_substantial_blocks() {
+        // two real content blocks across a big gap both stay in the span.
+        let mut ink = vec![0u32; 100];
+        ink[10..20].fill(10); // ink 100
+        ink[40..55].fill(10); // ink 150
+        assert_eq!(content_span(&ink, 5), Some((10, 55)));
+    }
+
+    // ---- content_bounds ----
+
+    /// White `w`×`h` page with one black rectangle [x0,y0)×... drawn in.
+    fn page_with_rect(w: usize, h: usize, x0: usize, y0: usize, x1: usize, y1: usize) -> Vec<u8> {
+        let mut buf = vec![255u8; w * h * 4];
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let i = (y * w + x) * 4;
+                buf[i] = 0;
+                buf[i + 1] = 0;
+                buf[i + 2] = 0;
+            }
+        }
+        buf
+    }
+
+    #[test]
+    fn bounds_blank_page_is_none() {
+        let buf = vec![255u8; 200 * 200 * 4];
+        assert!(content_bounds(&buf, 200, 200).is_none());
+    }
+
+    #[test]
+    fn bounds_track_centered_rect() {
+        let (w, h) = (200usize, 200usize);
+        let buf = page_with_rect(w, h, 60, 50, 140, 150);
+        let b = content_bounds(&buf, w, h).expect("rect should be found");
+        assert!((b.fx0 - 0.30).abs() < 0.02, "fx0={}", b.fx0);
+        assert!((b.fx1 - 0.70).abs() < 0.02, "fx1={}", b.fx1);
+        assert!((b.fy0 - 0.25).abs() < 0.02, "fy0={}", b.fy0);
+        assert!((b.fy1 - 0.75).abs() < 0.02, "fy1={}", b.fy1);
+    }
+
+    // ---- upscale_rgba ----
+
+    #[test]
+    fn upscale_preserves_size_and_corners() {
+        // 2×2 with distinct corners, upscaled 4×: corners must be preserved.
+        let src = vec![
+            10, 0, 0, 255, 20, 0, 0, 255, // row 0
+            30, 0, 0, 255, 40, 0, 0, 255, // row 1
+        ];
+        let out = upscale_rgba(&src, 2, 2, 8, 8);
+        assert_eq!(out.len(), 8 * 8 * 4);
+        assert_eq!(out[0], 10); // top-left
+        let tr = (7) * 4;
+        assert_eq!(out[tr], 20); // top-right
+        let bl = (7 * 8) * 4;
+        assert_eq!(out[bl], 30); // bottom-left
+    }
+}

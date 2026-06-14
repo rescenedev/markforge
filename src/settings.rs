@@ -166,3 +166,25 @@ pub fn parse_hex_color(s: &str) -> Option<gpui::Hsla> {
     let v = u32::from_str_radix(hex, 16).ok()?;
     Some(gpui::rgb(v).into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_hex_color;
+
+    #[test]
+    fn hex_valid_colors_parse() {
+        assert!(parse_hex_color("#ffffff").is_some());
+        assert!(parse_hex_color("#000000").is_some());
+        assert!(parse_hex_color("#3182f6").is_some());
+        assert!(parse_hex_color("  #1a1d29  ").is_some(), "should trim whitespace");
+    }
+
+    #[test]
+    fn hex_invalid_colors_rejected() {
+        assert!(parse_hex_color("#fff").is_none(), "3-digit not supported");
+        assert!(parse_hex_color("3182f6").is_none(), "missing #");
+        assert!(parse_hex_color("#gggggg").is_none(), "non-hex digits");
+        assert!(parse_hex_color("#12345").is_none(), "wrong length");
+        assert!(parse_hex_color("").is_none());
+    }
+}
