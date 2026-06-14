@@ -4,188 +4,202 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>MarkForge — native macOS Markdown viewer & editor</title>
-<meta name="description" content="A fast, native macOS Markdown viewer and editor built in Rust on GPUI. GPU-accelerated, live reload, split editor, no Electron." />
+<meta name="description" content="A fast, native macOS reader & editor for Markdown, code, JSON, PDF, Word and your Apple Notes. Built in Rust on Zed's GPUI. GPU-accelerated, git built in, no Electron." />
 <meta property="og:title" content="MarkForge" />
-<meta property="og:description" content="A fast, native macOS Markdown viewer & editor built in Rust on GPUI." />
+<meta property="og:description" content="A fast, native macOS reader & editor built in Rust on GPUI. No web view, no Electron." />
 <meta property="og:image" content="icon.png" />
+<meta name="theme-color" content="#0a0b10" />
 <link rel="icon" href="icon.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@500;600;700;800;900&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
 <style>
   :root{
-    /* Toss grayscale + blue, Apple restraint */
-    --ink:#191f28;        /* headings */
-    --body:#4e5968;       /* body copy */
-    --muted:#8b95a1;      /* captions */
-    --line:#e5e8eb;
-    --bg:#ffffff;
-    --bg-soft:#f9fafb;
-    --bg-gray:#f2f4f6;
-    --blue:#3182f6;
-    --blue-dark:#1b64da;
-    --radius:20px;
+    --bg:#0a0b10;
+    --bg2:#0c0e14;
+    --card:#101219;
+    --card-h:#14161f;
+    --line:rgba(255,255,255,.08);
+    --line2:rgba(255,255,255,.14);
+    --ink:#f5f7fb;
+    --body:#a3abbd;
+    --muted:#6b7384;
+    --blue:#6ea8fe;
+    --blue-2:#4f87f0;
+    --cyan:#62e8c8;
+    --display:"Geist","SF Pro Display",-apple-system,BlinkMacSystemFont,system-ui,sans-serif;
+    --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Geist","Segoe UI",system-ui,sans-serif;
+    --mono:"Geist Mono",ui-monospace,"SF Mono",Menlo,monospace;
+    --radius:18px;
   }
   *{box-sizing:border-box;margin:0;padding:0}
-  html{scroll-behavior:smooth}
+  html{scroll-behavior:smooth;background:var(--bg)}
   body{
-    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","Segoe UI",Pretendard,system-ui,sans-serif;
-    background:var(--bg);color:var(--body);line-height:1.6;
-    -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+    font-family:var(--sans);background:var(--bg);color:var(--body);line-height:1.6;
+    -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;overflow-x:hidden;
   }
   a{color:inherit;text-decoration:none}
-  .wrap{max-width:1024px;margin:0 auto;padding:0 24px}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px;position:relative;z-index:2}
 
-  /* ---------- reveal on scroll (Toss-style fade-up) ---------- */
-  .rv{opacity:0;transform:translateY(24px);transition:opacity .7s cubic-bezier(.22,1,.36,1),transform .7s cubic-bezier(.22,1,.36,1)}
+  /* ---------- ambient: grain + glows ---------- */
+  body::before{
+    content:"";position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.04;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  .glow{position:absolute;border-radius:50%;filter:blur(90px);pointer-events:none;z-index:0;opacity:.5}
+  .glow.a{width:620px;height:620px;background:radial-gradient(circle,rgba(79,135,240,.55),transparent 62%);top:-220px;left:50%;transform:translateX(-50%)}
+  .glow.b{width:460px;height:460px;background:radial-gradient(circle,rgba(98,232,200,.22),transparent 60%);top:340px;right:-120px}
+  .glow.c{width:520px;height:520px;background:radial-gradient(circle,rgba(110,168,254,.18),transparent 60%);left:-160px;top:1100px}
+
+  /* ---------- reveal ---------- */
+  .rv{opacity:0;transform:translateY(22px);transition:opacity .7s cubic-bezier(.22,1,.36,1),transform .7s cubic-bezier(.22,1,.36,1)}
   .rv.in{opacity:1;transform:none}
-  .rv.d1{transition-delay:.08s}.rv.d2{transition-delay:.16s}.rv.d3{transition-delay:.24s}
+  .rv.d1{transition-delay:.07s}.rv.d2{transition-delay:.14s}.rv.d3{transition-delay:.21s}
   @media(prefers-reduced-motion:reduce){.rv{opacity:1;transform:none;transition:none}}
 
-  /* ---------- nav ---------- */
-  nav{
-    position:sticky;top:0;z-index:50;
-    background:rgba(255,255,255,.72);
-    -webkit-backdrop-filter:saturate(180%) blur(20px);backdrop-filter:saturate(180%) blur(20px);
-    border-bottom:1px solid rgba(229,232,235,.7);
+  /* ---------- eyebrow ---------- */
+  .eyebrow{
+    font-family:var(--mono);font-size:12px;font-weight:500;letter-spacing:.18em;
+    text-transform:uppercase;color:var(--blue);display:inline-flex;align-items:center;gap:9px;
   }
-  .nav-in{display:flex;align-items:center;justify-content:space-between;height:60px}
-  .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:17px;color:var(--ink);letter-spacing:-.01em}
-  .brand img{width:28px;height:28px;border-radius:7px}
-  .nav-links{display:flex;gap:8px;align-items:center}
-  .nav-links a{font-size:14px;font-weight:500;color:var(--body);padding:7px 12px;border-radius:9px;transition:background .15s}
-  .nav-links a:hover{background:var(--bg-gray)}
-  .nav-links a.cta{background:var(--blue);color:#fff;font-weight:600}
-  .nav-links a.cta:hover{background:var(--blue-dark)}
+  .eyebrow::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--cyan);box-shadow:0 0 10px var(--cyan)}
+
+  /* ---------- nav ---------- */
+  nav{position:sticky;top:0;z-index:50;border-bottom:1px solid var(--line);
+    background:rgba(10,11,16,.6);-webkit-backdrop-filter:saturate(160%) blur(18px);backdrop-filter:saturate(160%) blur(18px)}
+  .nav-in{display:flex;align-items:center;justify-content:space-between;height:62px}
+  .brand{display:flex;align-items:center;gap:11px;font-weight:700;font-size:16px;color:var(--ink);letter-spacing:-.01em;font-family:var(--display)}
+  .brand img{width:30px;height:30px;border-radius:8px;box-shadow:0 0 0 1px var(--line2),0 6px 18px rgba(79,135,240,.25)}
+  .nav-links{display:flex;gap:4px;align-items:center}
+  .nav-links a{font-family:var(--mono);font-size:13px;font-weight:400;color:var(--body);padding:8px 13px;border-radius:10px;transition:color .15s,background .15s}
+  .nav-links a:hover{color:var(--ink);background:rgba(255,255,255,.05)}
+  .nav-links a.cta{font-family:var(--sans);font-weight:600;color:#06121f;background:var(--blue);box-shadow:0 6px 22px rgba(110,168,254,.3)}
+  .nav-links a.cta:hover{background:#86b8ff;color:#06121f}
+  @media(max-width:560px){.nav-links a:not(.cta){display:none}}
 
   /* ---------- buttons ---------- */
-  .btn{
-    display:inline-flex;align-items:center;justify-content:center;gap:8px;
-    padding:15px 28px;border-radius:14px;font-weight:600;font-size:16px;
-    transition:background .15s,transform .15s;cursor:pointer;
-  }
+  .btn{display:inline-flex;align-items:center;justify-content:center;gap:9px;
+    padding:15px 26px;border-radius:13px;font-weight:600;font-size:15.5px;
+    transition:transform .15s,background .15s,box-shadow .15s,border-color .15s;cursor:pointer}
   .btn:active{transform:scale(.98)}
-  .btn-blue{background:var(--blue);color:#fff}
-  .btn-blue:hover{background:var(--blue-dark)}
-  .btn-gray{background:var(--bg-gray);color:var(--ink)}
-  .btn-gray:hover{background:#e8ebee}
+  .btn-blue{background:var(--blue);color:#06121f;box-shadow:0 10px 34px rgba(110,168,254,.34)}
+  .btn-blue:hover{background:#8abaff;box-shadow:0 14px 42px rgba(110,168,254,.46)}
+  .btn-ghost{background:rgba(255,255,255,.04);color:var(--ink);border:1px solid var(--line2)}
+  .btn-ghost:hover{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.22)}
+  .btn svg{width:17px;height:17px}
 
   /* ---------- hero ---------- */
-  .hero{text-align:center;padding:104px 0 0}
-  .hero .logo{width:96px;height:96px;border-radius:22px;box-shadow:0 12px 40px rgba(25,31,40,.14);margin-bottom:32px}
-  .hero h1{
-    color:var(--ink);font-weight:800;letter-spacing:-.034em;line-height:1.08;
-    font-size:clamp(42px,7.5vw,76px);
-  }
-  .hero h1 em{font-style:normal;color:var(--blue)}
-  .hero .sub{font-size:clamp(17px,2.3vw,21px);max-width:560px;margin:24px auto 0;letter-spacing:-.01em}
-  .cta-row{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:36px}
-  .hero .fine{margin-top:18px;font-size:13px;color:var(--muted)}
+  .hero{text-align:center;padding:96px 0 0}
+  .hero .logo{width:92px;height:92px;border-radius:22px;margin-bottom:30px;
+    box-shadow:0 0 0 1px var(--line2),0 20px 60px rgba(79,135,240,.4),0 0 80px rgba(98,232,200,.16)}
+  .hero h1{font-family:var(--display);color:var(--ink);font-weight:800;letter-spacing:-.038em;line-height:1.05;
+    font-size:clamp(44px,8vw,82px);margin-top:26px}
+  .hero h1 em{font-style:normal;background:linear-gradient(120deg,var(--blue),var(--cyan));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .hero .sub{font-size:clamp(16.5px,2.2vw,20px);max-width:600px;margin:24px auto 0;letter-spacing:-.01em;color:var(--body)}
+  .cta-row{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:34px}
+  .hero .fine{margin-top:18px;font-family:var(--mono);font-size:12.5px;color:var(--muted);letter-spacing:.02em}
 
-  /* ---------- window mockup ---------- */
-  .shot{
-    margin:72px auto 0;max-width:880px;border-radius:16px;overflow:hidden;
-    border:1px solid var(--line);background:#fff;
-    box-shadow:0 24px 80px rgba(25,31,40,.16);
-    text-align:left;
-  }
-  .titlebar{display:flex;align-items:center;gap:8px;padding:11px 14px;background:#f5f5f7;border-bottom:1px solid var(--line)}
-  .tl{width:12px;height:12px;border-radius:50%}
+  /* ---------- window mockup (dark) ---------- */
+  .shot{margin:74px auto 0;max-width:900px;border-radius:15px;overflow:hidden;text-align:left;
+    border:1px solid var(--line2);background:#0d0f15;
+    box-shadow:0 1px 0 rgba(255,255,255,.05) inset,0 40px 120px rgba(0,0,0,.6),0 0 0 1px rgba(0,0,0,.4),0 0 90px rgba(79,135,240,.12)}
+  .titlebar{display:flex;align-items:center;gap:8px;padding:11px 15px;background:#15171f;border-bottom:1px solid var(--line)}
+  .tl{width:11px;height:11px;border-radius:50%}
   .tl.r{background:#ff5f57}.tl.y{background:#febc2e}.tl.g{background:#28c840}
-  .titlebar .name{margin-left:10px;font-size:13px;color:var(--muted);font-weight:500}
-  .split{display:grid;grid-template-columns:168px 1.1fr 1fr;min-height:320px}
-  .explorer{background:var(--bg-soft);border-right:1px solid var(--line);padding:10px 8px;font-size:12.5px}
-  .explorer .ehead{font-size:10px;letter-spacing:.08em;color:var(--muted);padding:2px 8px 8px;font-weight:700}
-  .frow{display:flex;align-items:center;gap:7px;padding:4.5px 9px;border-radius:7px;color:var(--body);white-space:nowrap}
-  .frow.sel{background:#0a84ff;color:#fff;font-weight:500}
-  .preview{padding:22px 24px;font-size:14px}
-  .preview h2{font-size:20px;color:var(--ink);letter-spacing:-.02em;margin-bottom:8px}
-  .preview h3{font-size:15px;color:var(--ink);margin:16px 0 6px}
+  .titlebar .name{margin-left:12px;font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .titlebar .branch{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--blue);display:inline-flex;align-items:center;gap:6px}
+  .titlebar .branch::before{content:"";width:5px;height:5px;border-radius:50%;background:var(--cyan)}
+  .split{display:grid;grid-template-columns:178px 1.08fr 1fr;min-height:340px}
+  .explorer{background:#0b0d12;border-right:1px solid var(--line);padding:12px 9px;font-size:12.5px}
+  .explorer .ehead{font-family:var(--mono);font-size:10px;letter-spacing:.12em;color:var(--muted);padding:2px 8px 10px}
+  .frow{display:flex;align-items:center;gap:7px;padding:5px 9px;border-radius:7px;color:var(--body);white-space:nowrap}
+  .frow.sel{background:linear-gradient(90deg,rgba(79,135,240,.9),rgba(79,135,240,.7));color:#fff;font-weight:500;box-shadow:0 4px 14px rgba(79,135,240,.3)}
+  .frow .dot{color:var(--muted)}
+  .preview{padding:24px 26px;font-size:14px;color:var(--body);background:#0d0f15}
+  .preview h2{font-family:var(--display);font-size:21px;color:var(--ink);letter-spacing:-.02em;margin-bottom:9px}
+  .preview h3{font-family:var(--display);font-size:14.5px;color:var(--ink);margin:18px 0 7px}
   .preview p{margin-bottom:10px}
-  .preview code{background:var(--bg-gray);padding:1.5px 6px;border-radius:5px;font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:12.5px;color:var(--ink)}
-  .task{display:flex;align-items:center;gap:9px;margin:5px 0}
-  .box{width:15px;height:15px;border-radius:4.5px;border:1.5px solid var(--blue);display:inline-flex;align-items:center;justify-content:center;flex:none}
+  .preview strong{color:var(--ink)}
+  .preview code{background:rgba(110,168,254,.12);padding:2px 6px;border-radius:5px;font-family:var(--mono);font-size:12px;color:var(--blue)}
+  .task{display:flex;align-items:center;gap:9px;margin:6px 0}
+  .box{width:15px;height:15px;border-radius:5px;border:1.5px solid var(--blue);display:inline-flex;align-items:center;justify-content:center;flex:none}
   .box.on{background:var(--blue);border-color:var(--blue)}
-  .box.on::after{content:"✓";color:#fff;font-size:10px;line-height:1}
-  .editor{
-    background:#252b37;color:#c3cad6;border-left:1px solid var(--line);
-    font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:12.5px;line-height:1.75;
-    padding:20px 22px;white-space:pre-wrap;
-  }
-  .editor .h{color:#7aa2f7}.editor .b{color:#eceff4;font-weight:700}.editor .c{color:#6b7689}.editor .k{color:#e0af68}
-  @media(max-width:720px){.split{grid-template-columns:1fr}.editor,.explorer{display:none}}
+  .box.on::after{content:"✓";color:#06121f;font-size:10px;line-height:1;font-weight:700}
+  .editor{background:#070809;color:#c3cad6;border-left:1px solid var(--line);
+    font-family:var(--mono);font-size:12px;line-height:1.85;padding:22px 22px;white-space:pre-wrap}
+  .editor .h{color:#6ea8fe}.editor .b{color:#f5f7fb;font-weight:600}.editor .c{color:#566072}.editor .k{color:var(--cyan)}.editor .s{color:#e0af68}
+  @media(max-width:760px){.split{grid-template-columns:1fr}.editor,.explorer{display:none}}
 
-  /* ---------- numbers strip ---------- */
-  .nums{padding:96px 0 0;text-align:center}
-  .nums .row{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;max-width:760px;margin:0 auto}
-  @media(max-width:640px){.nums .row{grid-template-columns:1fr}}
-  .num{padding:28px 12px}
-  .num b{display:block;font-size:clamp(34px,5vw,48px);font-weight:800;color:var(--ink);letter-spacing:-.03em;line-height:1.1}
-  .num b em{font-style:normal;color:var(--blue)}
-  .num span{font-size:14.5px;color:var(--muted);margin-top:6px;display:block}
+  /* ---------- stats ---------- */
+  .stats{padding:92px 0 0}
+  .stats .row{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;max-width:820px;margin:0 auto}
+  @media(max-width:640px){.stats .row{grid-template-columns:1fr}}
+  .stat{padding:30px 22px;text-align:center;border:1px solid var(--line);border-radius:var(--radius);
+    background:linear-gradient(180deg,rgba(255,255,255,.025),rgba(255,255,255,0))}
+  .stat b{display:block;font-family:var(--display);font-size:clamp(36px,5vw,50px);font-weight:800;color:var(--ink);letter-spacing:-.03em;line-height:1.05}
+  .stat b em{font-style:normal;font-size:.55em;color:var(--blue);font-weight:700;margin-left:2px}
+  .stat span{font-family:var(--mono);font-size:12.5px;color:var(--muted);margin-top:10px;display:block;letter-spacing:.03em}
 
   /* ---------- sections ---------- */
-  section{padding:112px 0}
-  .sec-head{text-align:center;max-width:640px;margin:0 auto 56px}
-  .sec-head h2{color:var(--ink);font-weight:800;letter-spacing:-.028em;line-height:1.18;font-size:clamp(30px,4.6vw,46px)}
-  .sec-head p{margin-top:14px;font-size:17px}
+  section{padding:118px 0}
+  .sec-head{text-align:center;max-width:660px;margin:0 auto 56px}
+  .sec-head .eyebrow{margin-bottom:18px}
+  .sec-head h2{font-family:var(--display);color:var(--ink);font-weight:800;letter-spacing:-.03em;line-height:1.12;font-size:clamp(30px,4.8vw,48px)}
+  .sec-head p{margin-top:16px;font-size:17px;color:var(--body)}
 
-  /* ---------- feature cards (Toss-style) ---------- */
-  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
-  @media(max-width:820px){.grid{grid-template-columns:1fr}}
-  .card{
-    background:var(--bg-soft);border-radius:var(--radius);padding:30px 28px;
-    transition:transform .25s cubic-bezier(.22,1,.36,1),box-shadow .25s;
-  }
-  .card:hover{transform:translateY(-4px);box-shadow:0 14px 36px rgba(25,31,40,.08)}
-  .card .ic{
-    width:44px;height:44px;border-radius:13px;background:#e8f1fe;color:var(--blue);
-    display:flex;align-items:center;justify-content:center;margin-bottom:18px;
-  }
-  .card .ic svg{width:22px;height:22px}
-  .card h3{font-size:17.5px;color:var(--ink);letter-spacing:-.015em;margin-bottom:6px}
-  .card p{font-size:14.5px;color:var(--body)}
+  /* ---------- feature cards ---------- */
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  @media(max-width:860px){.grid{grid-template-columns:1fr 1fr}}
+  @media(max-width:560px){.grid{grid-template-columns:1fr}}
+  .card{position:relative;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:28px 26px;
+    transition:transform .25s cubic-bezier(.22,1,.36,1),border-color .25s,background .25s;overflow:hidden}
+  .card::after{content:"";position:absolute;inset:0;border-radius:inherit;opacity:0;transition:opacity .3s;
+    background:radial-gradient(420px circle at var(--mx,50%) var(--my,0%),rgba(110,168,254,.1),transparent 60%);pointer-events:none}
+  .card:hover{transform:translateY(-5px);border-color:var(--line2);background:var(--card-h)}
+  .card:hover::after{opacity:1}
+  .card .ic{width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;margin-bottom:18px;
+    background:linear-gradient(160deg,rgba(110,168,254,.2),rgba(98,232,200,.08));border:1px solid var(--line2);color:var(--blue)}
+  .card .ic svg{width:21px;height:21px}
+  .card h3{font-family:var(--display);font-size:17px;color:var(--ink);letter-spacing:-.015em;margin-bottom:7px;position:relative}
+  .card p{font-size:14px;color:var(--body);position:relative}
 
   /* ---------- install ---------- */
-  #install{background:var(--bg-soft)}
-  .install-card{background:#fff;border:1px solid var(--line);border-radius:24px;padding:44px;max-width:760px;margin:0 auto}
-  @media(max-width:640px){.install-card{padding:28px 20px}}
-  .install-card h2{color:var(--ink);font-weight:800;letter-spacing:-.025em;font-size:clamp(26px,3.6vw,34px)}
-  .install-card .lead{margin:10px 0 28px;font-size:16px}
-  .code{
-    background:#191f28;border-radius:14px;padding:18px 20px;color:#e5e8eb;
-    font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:13.5px;line-height:1.7;
-    display:flex;justify-content:space-between;align-items:center;gap:16px;overflow-x:auto;
-  }
-  .code + .code{margin-top:12px}
-  .code .mut{color:#8b95a1}
-  .copy{
-    background:rgba(255,255,255,.1);color:#cfd5db;border:0;border-radius:9px;
-    padding:7px 13px;font-size:12px;font-weight:600;cursor:pointer;flex:none;
-    font-family:inherit;transition:background .15s;
-  }
-  .copy:hover{background:rgba(255,255,255,.2)}
+  #install .install-card{background:linear-gradient(180deg,var(--card),var(--bg2));border:1px solid var(--line2);border-radius:24px;padding:46px;max-width:800px;margin:0 auto;
+    box-shadow:0 40px 120px rgba(0,0,0,.5)}
+  @media(max-width:640px){#install .install-card{padding:28px 20px}}
+  .install-card .eyebrow{margin-bottom:16px}
+  .install-card h2{font-family:var(--display);color:var(--ink);font-weight:800;letter-spacing:-.025em;font-size:clamp(27px,3.8vw,38px);line-height:1.1}
+  .install-card .lead{margin:12px 0 28px;font-size:16px;color:var(--body)}
+  .code{background:#06070a;border:1px solid var(--line);border-radius:13px;padding:17px 19px;color:#e5e8eb;
+    font-family:var(--mono);font-size:13px;line-height:1.7;display:flex;justify-content:space-between;align-items:center;gap:16px;overflow-x:auto}
+  .code + .code{margin-top:11px}
+  .code .mut{color:var(--muted)}
+  .code .pr{color:var(--cyan)}
+  .copy{background:rgba(255,255,255,.06);color:#cfd5db;border:1px solid var(--line2);border-radius:9px;
+    padding:7px 13px;font-size:11.5px;font-weight:500;cursor:pointer;flex:none;font-family:var(--mono);transition:background .15s,color .15s}
+  .copy:hover{background:var(--blue);color:#06121f;border-color:var(--blue)}
   .alt{margin-top:20px;font-size:14px;color:var(--muted);text-align:center}
   .alt a{color:var(--blue);font-weight:600}
 
-  .keys{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-top:32px}
-  .keys div{
-    display:flex;justify-content:space-between;align-items:center;
-    background:var(--bg-soft);border-radius:12px;padding:12px 16px;font-size:14px;
-  }
-  .kbd{
-    background:#fff;border:1px solid var(--line);border-bottom-width:2px;border-radius:7px;
-    padding:2px 9px;font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:12.5px;color:var(--ink);
-  }
+  .keys{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:9px;margin-top:30px}
+  .keys div{display:flex;justify-content:space-between;align-items:center;gap:10px;
+    background:rgba(255,255,255,.02);border:1px solid var(--line);border-radius:11px;padding:11px 14px;font-size:13.5px;color:var(--body)}
+  .kbd{background:rgba(255,255,255,.05);border:1px solid var(--line2);border-bottom-width:2px;border-radius:7px;
+    padding:2px 9px;font-family:var(--mono);font-size:12px;color:var(--ink);flex:none}
 
-  /* ---------- closing CTA ---------- */
-  .closing{text-align:center;padding:128px 0}
-  .closing h2{color:var(--ink);font-weight:800;letter-spacing:-.03em;line-height:1.12;font-size:clamp(34px,5.6vw,58px)}
-  .closing p{margin:16px auto 32px;font-size:17px;max-width:460px}
+  /* ---------- closing ---------- */
+  .closing{text-align:center;padding:132px 0}
+  .closing h2{font-family:var(--display);color:var(--ink);font-weight:800;letter-spacing:-.032em;line-height:1.08;font-size:clamp(36px,6vw,62px)}
+  .closing h2 em{font-style:normal;background:linear-gradient(120deg,var(--blue),var(--cyan));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+  .closing p{margin:18px auto 34px;font-size:17px;max-width:480px;color:var(--body)}
 
-  footer{border-top:1px solid var(--line);padding:36px 0;text-align:center;font-size:13.5px;color:var(--muted)}
-  footer a{color:var(--body);font-weight:600}
-  footer a:hover{color:var(--ink)}
+  footer{border-top:1px solid var(--line);padding:40px 0;text-align:center;font-family:var(--mono);font-size:12.5px;color:var(--muted)}
+  footer a{color:var(--body);font-weight:500}
+  footer a:hover{color:var(--blue)}
 </style>
 </head>
 <body>
+<div class="glow a"></div><div class="glow b"></div><div class="glow c"></div>
 
 <nav>
   <div class="wrap nav-in">
@@ -201,68 +215,77 @@
 
 <header class="hero wrap">
   <img class="logo rv" src="icon.png" alt="MarkForge icon"/>
+  <div class="eyebrow rv d1">Native · Rust · GPU-accelerated</div>
   <h1 class="rv d1">Your documents,<br/><em>finally native.</em></h1>
-  <p class="sub rv d2">A GPU-accelerated reader &amp; editor for macOS — Markdown,
-  JSON, code, PDF, Word, even your Apple Notes. Git built in.
-  Built in Rust on Zed’s GPUI. No web view, no Electron.</p>
+  <p class="sub rv d2">One window for Markdown, JSON, code, PDF, Word — even your Apple Notes.
+  Git built in. Forged in Rust on Zed’s GPUI. No web view, no Electron.</p>
   <div class="cta-row rv d3">
-    <a class="btn btn-blue" href="#install">Install with Homebrew</a>
-    <a class="btn btn-gray" href="https://github.com/rescenedev/markforge/releases/latest">Download .app</a>
+    <a class="btn btn-blue" href="#install">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M16.5 2c.2 1.3-.3 2.6-1.1 3.5-.8 1-2.1 1.7-3.3 1.6-.2-1.3.4-2.6 1.1-3.4C14 2.7 15.4 2.1 16.5 2zM20 17.2c-.6 1.4-.9 2-1.7 3.2-1 1.7-2.5 3.7-4.3 3.7-1.6 0-2-1-4.2-1-2.1 0-2.6 1-4.1 1-1.9 0-3.2-1.9-4.3-3.5C-.6 17.8-1 12.7 1.2 10c1.1-1.4 2.7-2.2 4.2-2.2 1.7 0 2.7 1 4.1 1 1.3 0 2.1-1 4.1-1 1.4 0 2.9.8 4 2.1-3.5 1.9-2.9 6.9 2.4 7.3z"/></svg>
+      Install with Homebrew
+    </a>
+    <a class="btn btn-ghost" href="https://github.com/rescenedev/markforge/releases/latest">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Download .app
+    </a>
   </div>
-  <div class="fine rv d3">Free &amp; open source · macOS 13+ · Apple Silicon &amp; Intel</div>
+  <div class="fine rv d3">Free &amp; open source · 8&nbsp;MB download · macOS 13+ · Apple Silicon &amp; Intel</div>
 
   <div class="shot rv">
     <div class="titlebar">
       <span class="tl r"></span><span class="tl y"></span><span class="tl g"></span>
       <span class="name">README.md</span>
+      <span class="branch">main</span>
     </div>
     <div class="split">
       <div class="explorer">
-        <div class="ehead">MARKFORGE</div>
-        <div class="frow">▸ &nbsp;src</div>
-        <div class="frow">▸ &nbsp;docs</div>
-        <div class="frow">▾ &nbsp;assets</div>
+        <div class="ehead">EXPLORER</div>
+        <div class="frow"><span class="dot">▾</span> src</div>
+        <div class="frow"><span class="dot">▸</span> docs</div>
+        <div class="frow"><span class="dot">▾</span> assets</div>
         <div class="frow sel">&nbsp;&nbsp;&nbsp;README.md</div>
         <div class="frow">&nbsp;&nbsp;&nbsp;Cargo.toml</div>
+        <div class="frow"><span class="dot">▸</span> iCloud Notes</div>
       </div>
       <div class="preview">
         <h2>MarkForge</h2>
         <p>A <strong>native</strong> macOS Markdown app.</p>
         <h3>Features</h3>
-        <div class="task"><span class="box on"></span> Live reload</div>
-        <div class="task"><span class="box on"></span> Split editor</div>
-        <div class="task"><span class="box"></span> Tabs (soon)</div>
+        <div class="task"><span class="box on"></span> GPU-accelerated preview</div>
+        <div class="task"><span class="box on"></span> Split editor &amp; live reload</div>
+        <div class="task"><span class="box on"></span> Git diffs built in</div>
         <p style="margin-top:14px"><code>fn main() { … }</code></p>
       </div>
       <div class="editor"><span class="b"># MarkForge</span>
 
-A <span class="k">**native**</span> macOS Markdown app.
+A <span class="s">**native**</span> macOS Markdown app.
 
 <span class="h">## Features</span>
-- Live reload
-- Split editor
+- GPU-accelerated preview
+- Split editor &amp; live reload
 
-<span class="c">```rust
-fn main() {
-    println!("fast!");
+<span class="c">```rust</span>
+<span class="k">fn</span> main() {
+    println!(<span class="s">"fast!"</span>);
 }
-```</span></div>
+<span class="c">```</span></div>
     </div>
   </div>
 </header>
 
-<div class="nums wrap">
+<div class="stats wrap">
   <div class="row">
-    <div class="num rv"><b>18<em> MB</em></b><span>single binary</span></div>
-    <div class="num rv d1"><b>70<em> MB</em></b><span>memory in use</span></div>
-    <div class="num rv d2"><b>0<em>%</em></b><span>CPU when idle</span></div>
+    <div class="stat rv"><b>8<em>MB</em></b><span>download size</span></div>
+    <div class="stat rv d1"><b>0<em>%</em></b><span>CPU when idle</span></div>
+    <div class="stat rv d2"><b>0<em>×</em></b><span>Electron / web views</span></div>
   </div>
 </div>
 
 <section id="features">
   <div class="wrap">
     <div class="sec-head rv">
-      <h2>One window for<br/>everything you read.</h2>
+      <div class="eyebrow">Everything you read</div>
+      <h2>One window for<br/>everything you open.</h2>
       <p>The Markdown engine that powers Zed’s preview — now reading code, PDFs, Word docs, and your notes too.</p>
     </div>
     <div class="grid">
@@ -272,11 +295,11 @@ fn main() {
       </div>
       <div class="card rv d1">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></div>
-        <h3>Code, not just Markdown</h3><p>JSON (auto pretty-printed), Python, TypeScript, Rust, Go, YAML, and more — syntax-highlighted in the viewer and editor.</p>
+        <h3>Code, not just Markdown</h3><p>JSON (auto pretty-printed), Python, TypeScript, Rust, Go, YAML and more — syntax-highlighted in the viewer and editor.</p>
       </div>
       <div class="card rv d2">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></div>
-        <h3>PDF · Word · HWPX</h3><p>PDFs render as real pages via CoreGraphics — Korean slides, layout and all. Word/HWPX convert to Markdown.</p>
+        <h3>PDF · Word · HWPX</h3><p>PDFs render as real pages via CoreGraphics, with whitespace auto-trimmed so slides fill the view. Word &amp; HWPX convert to Markdown.</p>
       </div>
       <div class="card rv">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></svg></div>
@@ -292,7 +315,7 @@ fn main() {
       </div>
       <div class="card rv">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg></div>
-        <h3>Finder-style sidebar</h3><p>PLACES (Home · Desktop · Downloads) and favorites for the folders you open most. Arrow-key tree navigation; PageUp/Down to scroll.</p>
+        <h3>Finder-style sidebar</h3><p>Your home folders, iCloud Drive and favorites in one expandable tree. Arrow-key navigation; PageUp/Down to scroll.</p>
       </div>
       <div class="card rv d1">
         <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/></svg></div>
@@ -309,13 +332,14 @@ fn main() {
 <section id="install">
   <div class="wrap">
     <div class="install-card rv">
+      <div class="eyebrow">Install</div>
       <h2>Up and running<br/>in ten seconds.</h2>
-      <p class="lead">One command. No runtime, no setup.</p>
+      <p class="lead">One command. No runtime, no setup — just a single 24&nbsp;MB native binary.</p>
 
-      <div class="code"><span><span class="mut"># Homebrew (recommended)</span><br/>brew install --cask rescenedev/tap/markforge</span>
+      <div class="code"><span><span class="mut"># Homebrew (recommended)</span><br/><span class="pr">$</span> brew install --cask rescenedev/tap/markforge</span>
         <button class="copy" data-c="brew install --cask rescenedev/tap/markforge">Copy</button></div>
 
-      <div class="code"><span><span class="mut"># or build from source (needs Rust)</span><br/>git clone https://github.com/rescenedev/markforge &amp;&amp; cd markforge &amp;&amp; cargo run --release</span>
+      <div class="code"><span><span class="mut"># or build from source (needs Rust)</span><br/><span class="pr">$</span> git clone https://github.com/rescenedev/markforge &amp;&amp; cd markforge &amp;&amp; cargo run --release</span>
         <button class="copy" data-c="git clone https://github.com/rescenedev/markforge && cd markforge && cargo run --release">Copy</button></div>
 
       <p class="alt">Or grab <a href="https://github.com/rescenedev/markforge/releases/latest">MarkForge.app from the latest release</a>.</p>
@@ -335,17 +359,17 @@ fn main() {
 </section>
 
 <div class="closing wrap">
-  <h2 class="rv">Your Markdown<br/>deserves better.</h2>
+  <h2 class="rv">Your Markdown<br/>deserves <em>better.</em></h2>
   <p class="rv d1">Stop reading docs in a browser tab. Read them in an app that feels like macOS.</p>
   <div class="cta-row rv d2">
     <a class="btn btn-blue" href="#install">Get MarkForge</a>
-    <a class="btn btn-gray" href="https://github.com/rescenedev/markforge">Star on GitHub</a>
+    <a class="btn btn-ghost" href="https://github.com/rescenedev/markforge">Star on GitHub</a>
   </div>
 </div>
 
 <footer>
   <div class="wrap">
-    Built in Rust on <a href="https://github.com/longbridge/gpui-component">GPUI Component</a> ·
+    Forged in Rust on <a href="https://github.com/longbridge/gpui-component">GPUI Component</a> ·
     <a href="https://github.com/rescenedev/markforge">Source on GitHub</a> · MIT License
   </div>
 </footer>
@@ -355,6 +379,15 @@ fn main() {
     b.addEventListener('click',()=>{
       navigator.clipboard.writeText(b.dataset.c);
       const t=b.textContent;b.textContent='Copied!';setTimeout(()=>b.textContent=t,1200);
+    });
+  });
+
+  // pointer-tracked glow on feature cards
+  document.querySelectorAll('.card').forEach(c=>{
+    c.addEventListener('pointermove',e=>{
+      const r=c.getBoundingClientRect();
+      c.style.setProperty('--mx',(e.clientX-r.left)+'px');
+      c.style.setProperty('--my',(e.clientY-r.top)+'px');
     });
   });
 
