@@ -154,45 +154,9 @@ pub fn repo_status(dir: &Path) -> RepoStatus {
         })
         .unwrap_or_default();
 
-    let mut files = HashMap::new();
-    let mut dirty_dirs = HashSet::new();
-    if let Ok(porcelain) = git(dir, &["status", "--porcelain", "-z"]) {
-        let mut tokens = porcelain.split('\0');
-        while let Some(entry) = tokens.next() {
-            if entry.len() < 4 {
-                continue;
-            }
-            let (xy, rel) = entry.split_at(3);
-            let x = xy.as_bytes()[0] as char;
-            let y = xy.as_bytes()[1] as char;
-            // Renames/copies carry the original path as an extra token.
-            if matches!(x, 'R' | 'C') {
-                tokens.next();
-            }
-
-            let state = if x == 'U' || y == 'U' || (x == 'D' && y == 'D') || (x == 'A' && y == 'A')
-            {
-                FileState::Conflicted
-            } else if xy.starts_with("??") {
-                FileState::Untracked
-            } else if matches!(y, 'M' | 'D' | 'T') {
-                FileState::Modified
-            } else {
-                FileState::Staged
-            };
-
-            let path = root.join(rel.trim_end_matches('/'));
-            // Mark every ancestor directory (up to the root) as dirty.
-            let mut dir = path.parent();
-            while let Some(d) = dir {
-                if !d.starts_with(&root) || !dirty_dirs.insert(d.to_path_buf()) {
-                    break;
-                }
-                dir = d.parent();
-            }
-            files.insert(path, state);
-        }
-    }
+    let (files, dirty_dirs) = git(dir, &["status", "--porcelain", "-z"])
+        .map(|porcelain| parse_porcelain(&porcelain, &root))
+        .unwrap_or_default();
 
     RepoStatus {
         root: Some(root),
@@ -200,5 +164,97 @@ pub fn repo_status(dir: &Path) -> RepoStatus {
         branches,
         files,
         dirty_dirs,
+    }
+}
+
+/// Parse `git status --porcelain -z` into per-file states plus the set of dirty
+/// ancestor directories (for tree dots), all keyed by absolute path under
+/// `root`. Pure so it can be unit-tested without a real repository.
+fn parse_porcelain(porcelain: &str, root: &Path) -> (HashMap<PathBuf, FileState>, HashSet<PathBuf>) {
+    let mut files = HashMap::new();
+    let mut dirty_dirs = HashSet::new();
+    let mut tokens = porcelain.split('\0');
+    while let Some(entry) = tokens.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        let (xy, rel) = entry.split_at(3);
+        let x = xy.as_bytes()[0] as char;
+        let y = xy.as_bytes()[1] as char;
+        // Renames/copies carry the original path as an extra token.
+        if matches!(x, 'R' | 'C') {
+            tokens.next();
+        }
+
+        let state = if x == 'U' || y == 'U' || (x == 'D' && y == 'D') || (x == 'A' && y == 'A') {
+            FileState::Conflicted
+        } else if xy.starts_with("??") {
+            FileState::Untracked
+        } else if matches!(y, 'M' | 'D' | 'T') {
+            FileState::Modified
+        } else {
+            FileState::Staged
+        };
+
+        let path = root.join(rel.trim_end_matches('/'));
+        // Mark every ancestor directory (up to the root) as dirty.
+        let mut dir = path.parent();
+        while let Some(d) = dir {
+            if !d.starts_with(root) || !dirty_dirs.insert(d.to_path_buf()) {
+                break;
+            }
+            dir = d.parent();
+        }
+        files.insert(path, state);
+    }
+    (files, dirty_dirs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FileState, parse_porcelain};
+    use std::path::Path;
+
+    #[test]
+    fn porcelain_empty_is_empty() {
+        let (f, d) = parse_porcelain("", Path::new("/repo"));
+        assert!(f.is_empty() && d.is_empty());
+    }
+
+    #[test]
+    fn porcelain_classifies_each_state() {
+        let p = " M a.txt\0M  b.txt\0?? c.txt\0UU d.txt\0";
+        let (f, _) = parse_porcelain(p, Path::new("/repo"));
+        assert_eq!(f.get(Path::new("/repo/a.txt")), Some(&FileState::Modified));
+        assert_eq!(f.get(Path::new("/repo/b.txt")), Some(&FileState::Staged));
+        assert_eq!(f.get(Path::new("/repo/c.txt")), Some(&FileState::Untracked));
+        assert_eq!(f.get(Path::new("/repo/d.txt")), Some(&FileState::Conflicted));
+    }
+
+    #[test]
+    fn porcelain_rename_consumes_origin_token() {
+        // "R  new\0old\0" — the origin path is a separate NUL token that must be
+        // skipped so the following entry still parses correctly.
+        let p = "R  new.txt\0old.txt\0 M after.txt\0";
+        let (f, _) = parse_porcelain(p, Path::new("/repo"));
+        assert_eq!(f.get(Path::new("/repo/new.txt")), Some(&FileState::Staged));
+        assert_eq!(f.get(Path::new("/repo/after.txt")), Some(&FileState::Modified));
+        assert!(!f.contains_key(Path::new("/repo/old.txt")));
+    }
+
+    #[test]
+    fn porcelain_marks_ancestor_dirs_dirty() {
+        let (_, d) = parse_porcelain(" M src/ui/app.rs\0", Path::new("/repo"));
+        assert!(d.contains(Path::new("/repo/src/ui")));
+        assert!(d.contains(Path::new("/repo/src")));
+        assert!(d.contains(Path::new("/repo")));
+    }
+
+    #[test]
+    fn porcelain_skips_short_entries() {
+        // a stray empty/short token (e.g. trailing split) is ignored, not panicked on.
+        let (f, _) = parse_porcelain("\0x\0 M ok.txt\0", Path::new("/repo"));
+        assert_eq!(f.len(), 1);
+        assert_eq!(f.get(Path::new("/repo/ok.txt")), Some(&FileState::Modified));
     }
 }
