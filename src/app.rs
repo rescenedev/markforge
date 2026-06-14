@@ -88,7 +88,7 @@ struct CachedDoc {
 }
 
 /// What kind of document the buffer holds, driving highlighter and preview.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum DocKind {
     /// Rendered as Markdown (also: txt and converted docx/hwpx/pdf).
     Markdown,
@@ -2734,8 +2734,60 @@ fn first_markdown(paths: &[PathBuf]) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_markdown, prettify_minified_json};
-    use std::path::PathBuf;
+    use super::{DocKind, first_markdown, prettify_minified_json};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn dockind_maps_known_extensions() {
+        let cases = [
+            ("a.rs", "rust"),
+            ("a.py", "python"),
+            ("a.json", "json"),
+            ("a.jsonc", "json"),
+            ("a.tsx", "tsx"),
+            ("a.ts", "typescript"),
+            ("a.mjs", "javascript"),
+            ("a.zsh", "bash"),
+            ("a.yml", "yaml"),
+            ("a.htm", "html"),
+        ];
+        for (name, lang) in cases {
+            assert_eq!(
+                DocKind::for_path(Path::new(name)),
+                DocKind::Code { lang, highlight: true },
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn dockind_defaults_to_markdown() {
+        assert_eq!(DocKind::for_path(Path::new("README.md")), DocKind::Markdown);
+        assert_eq!(DocKind::for_path(Path::new("notes.txt")), DocKind::Markdown);
+        assert_eq!(DocKind::for_path(Path::new("noext")), DocKind::Markdown);
+        assert_eq!(DocKind::for_path(Path::new("a.unknown")), DocKind::Markdown);
+    }
+
+    #[test]
+    fn dockind_extension_is_case_insensitive() {
+        assert_eq!(
+            DocKind::for_path(Path::new("Main.RS")),
+            DocKind::Code { lang: "rust", highlight: true }
+        );
+    }
+
+    #[test]
+    fn editor_language_drops_lang_when_highlight_off() {
+        assert_eq!(DocKind::Markdown.editor_language(), "markdown");
+        assert_eq!(
+            DocKind::Code { lang: "rust", highlight: true }.editor_language(),
+            "rust"
+        );
+        assert_eq!(
+            DocKind::Code { lang: "rust", highlight: false }.editor_language(),
+            "text"
+        );
+    }
 
     #[test]
     fn prettify_expands_minified_json() {

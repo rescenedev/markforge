@@ -362,8 +362,59 @@ fn collapse_blank_lines(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{collapse_blank_lines, is_imported_doc, is_supported_doc};
+    use super::{
+        IMPORT_MAX_BYTES, collapse_blank_lines, ext_lowercase, is_imported_doc, is_supported_doc,
+        push_markdown_table, styled_run, truncate_converted,
+    };
     use std::path::Path;
+
+    #[test]
+    fn ext_lowercase_normalizes() {
+        assert_eq!(ext_lowercase(Path::new("A.PDF")).as_deref(), Some("pdf"));
+        assert_eq!(ext_lowercase(Path::new("a.Md")).as_deref(), Some("md"));
+        assert_eq!(ext_lowercase(Path::new("noext")), None);
+    }
+
+    #[test]
+    fn truncate_converted_passes_short_text() {
+        let s = "small document".to_string();
+        assert_eq!(truncate_converted(s.clone()), s);
+    }
+
+    #[test]
+    fn truncate_converted_caps_and_notes_long_text() {
+        let big = "a".repeat(IMPORT_MAX_BYTES + 5_000);
+        let out = truncate_converted(big);
+        assert!(out.len() < IMPORT_MAX_BYTES + 200);
+        assert!(out.contains("truncated"));
+    }
+
+    #[test]
+    fn truncate_converted_respects_char_boundaries() {
+        // multi-byte chars right at the cap must not panic or split mid-codepoint.
+        let big = "가".repeat(IMPORT_MAX_BYTES); // 3 bytes each
+        let out = truncate_converted(big);
+        assert!(out.contains("truncated"));
+    }
+
+    #[test]
+    fn styled_run_wraps_emphasis() {
+        assert_eq!(styled_run("hi", true, false), "**hi** ");
+        assert_eq!(styled_run("hi", false, true), "*hi* ");
+        assert_eq!(styled_run("hi", true, true), "***hi*** ");
+        assert_eq!(styled_run("hi", false, false), "hi");
+        assert_eq!(styled_run("   ", true, true), "   "); // blank passes through
+    }
+
+    #[test]
+    fn markdown_table_has_header_separator_and_escapes_pipes() {
+        let mut out = String::new();
+        push_markdown_table(&mut out, &[vec!["a".into(), "b|c".into()], vec!["1".into()]]);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "| a | b\\|c |"); // pipe escaped, padded to 2 cols
+        assert_eq!(lines[1], "| --- | --- |"); // separator after header row
+        assert_eq!(lines[2], "| 1 |  |"); // missing cell rendered empty
+    }
 
     #[test]
     fn supported_extensions_accepted() {
