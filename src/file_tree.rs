@@ -36,8 +36,11 @@ pub struct FileTree {
     generation: u64,
     /// One flattened subtree per root, cached until `generation` changes —
     /// `rows_under` runs every frame, so re-walking large folders janks.
-    rows_cache: RefCell<HashMap<PathBuf, (u64, Rc<Vec<Row>>)>>,
+    rows_cache: RefCell<RowCache>,
 }
+
+/// Per-root flattened rows tagged with the `generation` they were built at.
+type RowCache = HashMap<PathBuf, (u64, Rc<Vec<Row>>)>;
 
 impl FileTree {
     pub fn new() -> Self {
@@ -92,11 +95,10 @@ impl FileTree {
     /// Rows for `root` as an expandable subtree: the root itself at depth 0,
     /// then its expanded descendants. Cached per generation.
     pub fn rows_under(&self, root: &Path) -> Rc<Vec<Row>> {
-        if let Some((cached_gen, rows)) = self.rows_cache.borrow().get(root) {
-            if *cached_gen == self.generation {
+        if let Some((cached_gen, rows)) = self.rows_cache.borrow().get(root)
+            && *cached_gen == self.generation {
                 return rows.clone();
             }
-        }
         let mut out = Vec::new();
         let name = root
             .file_name()

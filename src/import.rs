@@ -162,20 +162,18 @@ fn docx_xml_to_markdown(xml: &str) -> String {
                 b"w:tab" => run.push('\t'),
                 _ => {}
             },
-            Ok(Event::Text(t)) => {
-                if in_text {
+            Ok(Event::Text(t))
+                if in_text => {
                     run.push_str(&t.xml_content().unwrap_or_default());
                 }
-            }
             Ok(Event::End(e)) => match e.name().as_ref() {
                 b"w:t" => in_text = false,
                 b"w:pPr" => in_para_props = false,
                 b"w:rPr" => in_run_props = false,
-                b"w:r" => {
-                    if !run.is_empty() {
+                b"w:r"
+                    if !run.is_empty() => {
                         para.push_str(&styled_run(&run, bold, italic));
                     }
-                }
                 b"w:p" => {
                     let line = para.trim().to_string();
                     if let Some(cell) =
@@ -210,11 +208,10 @@ fn docx_xml_to_markdown(xml: &str) -> String {
                 }
                 b"w:tbl" => {
                     table_depth = table_depth.saturating_sub(1);
-                    if table_depth == 0 {
-                        if let Some(rows) = table.take() {
+                    if table_depth == 0
+                        && let Some(rows) = table.take() {
                             push_markdown_table(&mut out, &rows);
                         }
-                    }
                 }
                 _ => {}
             },
@@ -308,16 +305,14 @@ fn hwpx_section_to_text(xml: &str, out: &mut String) {
     loop {
         match reader.read_event() {
             Err(_) | Ok(Event::Eof) => break,
-            Ok(Event::Start(e)) => {
-                if e.name().as_ref() == b"hp:t" {
+            Ok(Event::Start(e))
+                if e.name().as_ref() == b"hp:t" => {
                     in_text = true;
                 }
-            }
-            Ok(Event::Text(t)) => {
-                if in_text {
+            Ok(Event::Text(t))
+                if in_text => {
                     para.push_str(&t.xml_content().unwrap_or_default());
                 }
-            }
             Ok(Event::End(e)) => match e.name().as_ref() {
                 b"hp:t" => in_text = false,
                 b"hp:p" => {

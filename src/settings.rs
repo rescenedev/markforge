@@ -102,7 +102,7 @@ impl Settings {
         *self.usage.entry(path.to_path_buf()).or_insert(0) += 1;
         if self.usage.len() > 200 {
             let mut entries: Vec<_> = std::mem::take(&mut self.usage).into_iter().collect();
-            entries.sort_by(|a, b| b.1.cmp(&a.1));
+            entries.sort_by_key(|e| std::cmp::Reverse(e.1));
             entries.truncate(100);
             self.usage = entries.into_iter().collect();
         }
@@ -125,16 +125,14 @@ impl Settings {
     /// best-effort and must not interrupt the app.
     pub fn save(&self) {
         let Some(path) = Self::path() else { return };
-        if let Some(dir) = path.parent() {
-            if std::fs::create_dir_all(dir).is_err() {
+        if let Some(dir) = path.parent()
+            && std::fs::create_dir_all(dir).is_err() {
                 return;
             }
-        }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            if let Err(err) = std::fs::write(&path, json) {
+        if let Ok(json) = serde_json::to_string_pretty(self)
+            && let Err(err) = std::fs::write(&path, json) {
                 eprintln!("markforge: failed to save settings: {err}");
             }
-        }
     }
 
     /// Move `path` to the front of the recent list (deduplicated, capped).

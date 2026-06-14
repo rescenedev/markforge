@@ -365,11 +365,10 @@ impl MarkForge {
     ) {
         let mut text = text.into();
         if let DocKind::Code { lang, .. } = self.doc_kind {
-            if lang == "json" {
-                if let Some(pretty) = prettify_minified_json(&text) {
+            if lang == "json"
+                && let Some(pretty) = prettify_minified_json(&text) {
                     text = pretty.into();
                 }
-            }
             // Re-decide editor highlighting on the final document size.
             let highlight = text.len() <= HIGHLIGHT_MAX_BYTES;
             self.set_doc_kind(DocKind::Code { lang, highlight }, cx);
@@ -437,15 +436,13 @@ impl MarkForge {
 
         // Cache hit with a fresh mtime → no disk read, no prettify, no wait.
         let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-        if modified.is_some() {
-            if let Some(doc) = self.doc_cache.get(&path) {
-                if doc.modified == modified {
+        if modified.is_some()
+            && let Some(doc) = self.doc_cache.get(&path)
+                && doc.modified == modified {
                     let text = doc.text.clone();
                     self.apply_loaded(path, modified, text, window, cx);
                     return;
                 }
-            }
-        }
 
         let read = {
             let path = path.clone();
@@ -1321,13 +1318,12 @@ impl MarkForge {
         let (_, row) = sel[pos].clone();
         if row.entry.is_dir && row.expanded {
             self.file_tree.toggle(&row.entry.path);
-        } else if row.depth > 0 {
-            if let Some(pp) = sel[..pos].iter().rposition(|(_, r)| r.depth < row.depth) {
+        } else if row.depth > 0
+            && let Some(pp) = sel[..pos].iter().rposition(|(_, r)| r.depth < row.depth) {
                 let (idx, prow) = &sel[pp];
                 self.tree_cursor = Some(prow.entry.path.clone());
                 self.tree_scroll.scroll_to_item(*idx);
             }
-        }
         cx.notify();
     }
 
@@ -2717,7 +2713,7 @@ fn prettify_minified_json(text: &str) -> Option<String> {
 }
 
 /// Surface a failed write as an in-window error notification.
-fn notify_save_error(path: &PathBuf, err: &std::io::Error, window: &mut Window, cx: &mut App) {
+fn notify_save_error(path: &Path, err: &std::io::Error, window: &mut Window, cx: &mut App) {
     window.push_notification(
         (
             NotificationType::Error,

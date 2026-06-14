@@ -225,12 +225,12 @@ fn content_bounds(buf: &[u8], w: usize, h: usize) -> Option<Bounds> {
 
     let mut col_ink = vec![0u32; w];
     let mut row_ink = vec![0u32; h];
-    for y in 0..h {
+    for (y, row_count) in row_ink.iter_mut().enumerate() {
         let row = y * w * 4;
-        for x in 0..w {
+        for (x, col_count) in col_ink.iter_mut().enumerate() {
             if is_ink(row + x * 4) {
-                col_ink[x] += 1;
-                row_ink[y] += 1;
+                *col_count += 1;
+                *row_count += 1;
             }
         }
     }
