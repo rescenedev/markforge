@@ -29,6 +29,9 @@ const FILL_MIN: f64 = 0.9;
 /// (long receipts, banners) can't balloon the bitmap. Bounds memory at
 /// `TARGET_WIDTH × MAX_DIM × 4` bytes.
 const MAX_DIM: f64 = 6000.0;
+/// Cache layout version. Bump when render parameters change so stale page
+/// images regenerate; older versions are pruned from disk on the next render.
+const CACHE_VERSION: &str = "v3";
 /// Don't rasterize monster documents past this many pages.
 const MAX_PAGES: usize = 80;
 
@@ -56,6 +59,7 @@ fn invalid(msg: impl ToString) -> io::Error {
 
 /// Render `path` to page images and return Markdown that displays them.
 pub fn pdf_to_markdown_pages(path: &Path) -> io::Result<String> {
+    prune_stale_cache();
     let doc = open_document(path)?;
     let page_count = CGPDFDocument::number_of_pages(Some(&doc));
     if page_count == 0 {
@@ -98,6 +102,11 @@ fn open_document(path: &Path) -> io::Result<CFRetained<CGPDFDocument>> {
     Ok(doc)
 }
 
+/// Root of the on-disk page cache under the system temp dir.
+fn cache_root() -> PathBuf {
+    std::env::temp_dir().join("markforge-pdf")
+}
+
 /// Cache directory keyed by path + size + mtime, so edits invalidate it.
 fn cache_dir_for(path: &Path) -> io::Result<PathBuf> {
     let meta = std::fs::metadata(path)?;
@@ -107,14 +116,31 @@ fn cache_dir_for(path: &Path) -> io::Result<PathBuf> {
     if let Ok(modified) = meta.modified() {
         modified.hash(&mut hasher);
     }
-    // Bump the version segment when the render parameters change so stale
-    // (differently-scaled) page images are regenerated.
-    let dir = std::env::temp_dir()
-        .join("markforge-pdf")
-        .join("v3")
+    let dir = cache_root()
+        .join(CACHE_VERSION)
         .join(format!("{:016x}", hasher.finish()));
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+/// Delete cache left by older render formats/versions (once per process), so
+/// the temp dir doesn't accumulate stale page images across upgrades.
+fn prune_stale_cache() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| prune_versions(&cache_root(), CACHE_VERSION));
+}
+
+/// Remove every entry directly under `root` except the one named `keep`.
+/// Best-effort: errors (missing root, a busy file) are ignored.
+fn prune_versions(root: &Path, keep: &str) {
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        if entry.file_name().to_str() != Some(keep) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// Content bounds within a page, as fractions of width/height measured from the
@@ -458,6 +484,27 @@ mod tests {
     }
 
     // ---- upscale_rgba ----
+
+    #[test]
+    fn prune_versions_keeps_only_current() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "markforge-pdf-test-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(root.join("v2").join("x")).unwrap();
+        std::fs::create_dir_all(root.join("v3").join("y")).unwrap();
+        std::fs::create_dir_all(root.join("oldhash")).unwrap();
+
+        prune_versions(&root, "v3");
+
+        assert!(root.join("v3").join("y").exists(), "current version kept");
+        assert!(!root.join("v2").exists(), "old version removed");
+        assert!(!root.join("oldhash").exists(), "legacy hash dir removed");
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn upscale_preserves_size_and_corners() {
