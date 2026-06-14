@@ -503,4 +503,25 @@ mod tests {
                    </w:tr></w:tbl>";
         assert_eq!(docx_xml_to_markdown(xml), "| A | B |\n| --- | --- |\n\n");
     }
+
+    // ---- HWPX (Hangul) section conversion ----
+    use super::hwpx_section_to_text;
+
+    #[test]
+    fn hwpx_section_extracts_paragraph_text() {
+        let xml = "<hp:p><hp:run><hp:t>Hello</hp:t></hp:run></hp:p>\
+                   <hp:p><hp:run><hp:t>World</hp:t></hp:run></hp:p>";
+        let mut out = String::new();
+        hwpx_section_to_text(xml, &mut out);
+        assert_eq!(out, "Hello\n\nWorld\n\n");
+    }
+
+    #[test]
+    fn hwpx_section_concatenates_runs_and_skips_empty_paragraphs() {
+        let xml = "<hp:p></hp:p>\
+                   <hp:p><hp:run><hp:t>가</hp:t></hp:run><hp:run><hp:t>나다</hp:t></hp:run></hp:p>";
+        let mut out = String::new();
+        hwpx_section_to_text(xml, &mut out);
+        assert_eq!(out, "가나다\n\n");
+    }
 }

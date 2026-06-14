@@ -187,4 +187,31 @@ mod tests {
         assert!(parse_hex_color("#12345").is_none(), "wrong length");
         assert!(parse_hex_color("").is_none());
     }
+
+    // ---- Settings (de)serialization ----
+    use super::Settings;
+
+    #[test]
+    fn settings_serde_roundtrip_is_stable() {
+        let json1 = serde_json::to_string(&Settings::default()).unwrap();
+        let back: Settings = serde_json::from_str(&json1).unwrap();
+        let json2 = serde_json::to_string(&back).unwrap();
+        assert_eq!(json1, json2, "round-trip must not lose or reshape data");
+    }
+
+    #[test]
+    fn settings_fills_defaults_for_missing_fields() {
+        // #[serde(default)] lets a partial config (only `zoom`) still load.
+        let s: Settings = serde_json::from_str(r#"{"zoom": 1.5}"#).unwrap();
+        assert_eq!(s.zoom, 1.5_f32);
+        assert_eq!(s.body_font_size, Settings::default().body_font_size);
+        assert_eq!(s.sidebar_open, Settings::default().sidebar_open);
+    }
+
+    #[test]
+    fn settings_ignores_unknown_fields() {
+        // A field removed in a later version must not break loading old configs.
+        let s: Settings = serde_json::from_str(r#"{"zoom": 1.0, "obsolete": true}"#).unwrap();
+        assert_eq!(s.zoom, 1.0_f32);
+    }
 }
