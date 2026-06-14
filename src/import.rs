@@ -455,4 +455,52 @@ mod tests {
         assert_eq!(collapse_blank_lines("a\nb"), "a\nb");
         assert_eq!(collapse_blank_lines("a\n\nb"), "a\n\nb");
     }
+
+    // ---- OOXML (docx) conversion ----
+    use super::{docx_xml_to_markdown, heading_level};
+
+    #[test]
+    fn heading_level_maps_styles() {
+        assert_eq!(heading_level("Title"), 1);
+        assert_eq!(heading_level("Heading1"), 1);
+        assert_eq!(heading_level("heading3"), 3);
+        assert_eq!(heading_level("Heading6"), 6);
+        assert_eq!(heading_level("Heading7"), 0); // out of 1..=6
+        assert_eq!(heading_level("Heading"), 0); // no number
+        assert_eq!(heading_level("Normal"), 0);
+    }
+
+    #[test]
+    fn docx_paragraph_becomes_text_block() {
+        let xml = "<w:p><w:r><w:t>Hello world</w:t></w:r></w:p>";
+        assert_eq!(docx_xml_to_markdown(xml), "Hello world\n\n");
+    }
+
+    #[test]
+    fn docx_heading_style_emits_hashes() {
+        let xml = "<w:p><w:pPr><w:pStyle w:val=\"Heading2\"/></w:pPr>\
+                   <w:r><w:t>Section</w:t></w:r></w:p>";
+        assert_eq!(docx_xml_to_markdown(xml), "## Section\n\n");
+    }
+
+    #[test]
+    fn docx_bold_run_wraps_emphasis() {
+        let xml = "<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>strong</w:t></w:r></w:p>";
+        assert_eq!(docx_xml_to_markdown(xml), "**strong**\n\n");
+    }
+
+    #[test]
+    fn docx_list_item_uses_bullet() {
+        let xml = "<w:p><w:pPr><w:numPr/></w:pPr><w:r><w:t>item</w:t></w:r></w:p>";
+        assert_eq!(docx_xml_to_markdown(xml), "- item\n");
+    }
+
+    #[test]
+    fn docx_table_renders_markdown_grid() {
+        let xml = "<w:tbl><w:tr>\
+                   <w:tc><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc>\
+                   <w:tc><w:p><w:r><w:t>B</w:t></w:r></w:p></w:tc>\
+                   </w:tr></w:tbl>";
+        assert_eq!(docx_xml_to_markdown(xml), "| A | B |\n| --- | --- |\n\n");
+    }
 }
